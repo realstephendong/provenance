@@ -1,0 +1,67 @@
+{
+  "name": "hindsight",
+  "displayName": "Hindsight",
+  "description": "Select code, see the Slack conversations that explain why it is the way it is.",
+  "version": "0.1.0",
+  "publisher": "acme",
+  "private": true,
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Other"],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "hindsight.explain",
+        "title": "Hindsight: Explain this code",
+        "category": "Hindsight"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "hindsight.explain",
+        "key": "ctrl+alt+w",
+        "mac": "cmd+alt+w",
+        "when": "editorTextFocus"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "hindsight.explain",
+          "when": "editorHasSelection",
+          "group": "navigation@9"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Hindsight",
+      "properties": {
+        "hindsight.serviceUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8000",
+          "description": "Base URL of the Hindsight retrieval service."
+        },
+        "hindsight.codeLens": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show a 'N discussions' CodeLens above each declaration. Off by default: it issues one request per symbol per file open. Turn it on for a demo."
+        },
+        "hindsight.contextFile": {
+          "type": "string",
+          "default": ".hindsight/context.md",
+          "description": "Workspace-relative file that 'Send to agent' appends to."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.4.0"
+  }
+}

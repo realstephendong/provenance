@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+.qdrant_storage/
+.hindsight/
+node_modules/
+extension/out/
+extension/*.vsix
+seed/repo/
+seed/slack/
+.pytest_cache/
+extension/preview.html
