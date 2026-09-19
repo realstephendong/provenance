@@ -21,8 +21,11 @@ from .slack_source import _MENTION, Message, to_message
 _HUMAN_ID_PREFIXES = ("U", "W")      # bot ids (B...) are not resolvable with users.info
 
 
-def _apply_workspace(workspace_url: str) -> None:
-    """Point permalinks at the real workspace (`Unit.permalink` reads config)."""
+def apply_workspace(workspace_url: str) -> None:
+    """Point permalinks at the real workspace (`Unit.permalink` reads config).
+
+    Public because the Slack bot must do this at boot too: skip it and every
+    permalink it writes points at the `acme` placeholder and 404s."""
     host = urlparse(workspace_url).hostname or ""
     if host.endswith(".slack.com"):
         config.SLACK_WORKSPACE = host[: -len(".slack.com")]
@@ -52,8 +55,10 @@ def _fetch_channel(client: SlackClient, channel_id: str, oldest: float) -> list[
     return list(by_ts.values())
 
 
-def _resolve_names(client: SlackClient, raw_messages: list[dict]) -> dict[str, str]:
-    """user/bot id -> display name, using users.info once per distinct human id."""
+def resolve_names(client: SlackClient, raw_messages: list[dict]) -> dict[str, str]:
+    """user/bot id -> display name, using users.info once per distinct human id.
+
+    Public because the Slack bot's on-demand path resolves names the same way."""
     names: dict[str, str] = {}
     wanted: set[str] = set()
     for m in raw_messages:
@@ -78,12 +83,12 @@ def _resolve_names(client: SlackClient, raw_messages: list[dict]) -> dict[str, s
 
 def load_slack(client: SlackClient, report: AccessReport, oldest: float = 0.0) -> list[Message]:
     """Read every channel `report` says is accessible. `oldest=0` is the entire history."""
-    _apply_workspace(report.workspace_url)
+    apply_workspace(report.workspace_url)
 
     out: list[Message] = []
     for channel in report.channels:
         raw = _fetch_channel(client, channel.channel_id, oldest)
-        names = _resolve_names(client, raw)
+        names = resolve_names(client, raw)
         kept = [
             msg for m in raw
             if (msg := to_message(m, channel.channel_id, channel.name,

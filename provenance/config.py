@@ -177,3 +177,27 @@ SLACK_THREAD_LOOKBACK_DAYS = int(os.environ.get("SLACK_THREAD_LOOKBACK_DAYS", "1
 SLACK_TIMEOUT_SECONDS = 30.0
 SLACK_MAX_RETRIES = 5
 SLACK_PAGE_SIZE = 200
+
+# --- Slack bot (python -m provenance.slackbot, or: make slackbot) -----------------
+# The bot indexes one conversation on demand, from inside Slack. It runs over Socket
+# Mode, so it needs no public URL -- but Socket Mode needs two tokens the read-only
+# ingest path does not:
+#
+#   SLACK_BOT_TOKEN (xoxb-)  the app's bot user; carries the command plumbing
+#   SLACK_APP_TOKEN (xapp-)  the app-level token that opens the socket
+#
+# Reading the conversation still goes through SLACK_USER_TOKEN, so the bot can only
+# see what you can see. Blank tokens = the bot is off; nothing else changes.
+SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "").strip()
+SLACK_APP_TOKEN = os.environ.get("SLACK_APP_TOKEN", "").strip()
+# Must match the command declared in slack_app_manifest.yml.
+SLACK_BOT_COMMAND = os.environ.get("SLACK_BOT_COMMAND", "/provenance").strip()
+SLACK_BOT_SHORTCUT = "index_thread"      # the message shortcut's callback_id
+SLACK_BOT_PICKER_LIMIT = 5               # conversations offered by a bare /provenance
+# A bare slash command carries no thread_ts (Slack does not send one), so the picker
+# re-reads this much recent history to work out what the channel's conversations are.
+# One conversations.history call, newest first, never paginated.
+SLACK_BOT_HISTORY_MESSAGES = 200
+# Added to the conversation in Slack after indexing, so the next `make ingest-slack`
+# keeps a unit that is under MIN_MESSAGES_PER_UNIT. Must be in TRIGGER_EMOJI.
+SLACK_BOT_PIN_EMOJI = "pushpin"

@@ -19,6 +19,7 @@ packages = [
     "provenance",
     "provenance.integrations",
     "provenance.ingest",
+    "provenance.slackbot",
     "provenance.service",
     "provenance.mcp_server",
     "provenance.cli",
