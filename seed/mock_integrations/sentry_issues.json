@@ -1,0 +1,23 @@
+[
+  {
+    "id": "WEBHOOK-184",
+    "title": "Duplicate webhook delivery spike during failover window",
+    "first_seen": "2026-01-25T09:12:00Z",
+    "status": "resolved",
+    "pr_number": 4821
+  },
+  {
+    "id": "WEBHOOK-201",
+    "title": "Merchant endpoint 503s in a burst immediately after recovery",
+    "first_seen": "2026-03-02T04:41:00Z",
+    "status": "resolved",
+    "pr_number": 5012
+  },
+  {
+    "id": "WEBHOOK-233",
+    "title": "Delivery worker pool saturated, queue depth climbing",
+    "first_seen": "2026-03-30T22:05:00Z",
+    "status": "unresolved",
+    "pr_number": 5233
+  }
+]

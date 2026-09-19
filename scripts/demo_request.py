@@ -1,81 +1,53 @@
 #!/usr/bin/env python3
-"""Fire the canonical demo query at a running service and print the panel.
+"""One canned POST /context, for checking the service by hand.
 
-    python scripts/demo_request.py [file] [start] [end]
-
-Defaults to the demo selection: the retry loop in webhooks/delivery.py, whose
-blame resolves to PR #4821.
+    python scripts/demo_request.py
+    python scripts/demo_request.py --raw
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from pathlib import Path
 
 import httpx
 
-ROOT = Path(__file__).resolve().parent.parent
-REPO = ROOT / "seed" / "repo"
-SERVICE = "http://127.0.0.1:8000"
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-DEMO_FILE, DEMO_START, DEMO_END = "webhooks/delivery.py", 23, 68
+from provenance import config                      # noqa: E402
+from provenance.cli.main import render             # noqa: E402
+from provenance.models import ContextResponse      # noqa: E402
+
+FILE = "webhooks/delivery.py"
+START, END = 20, 40
 
 
-def main() -> None:
-    file_path = sys.argv[1] if len(sys.argv) > 1 else DEMO_FILE
-    start = int(sys.argv[2]) if len(sys.argv) > 2 else DEMO_START
-    end = int(sys.argv[3]) if len(sys.argv) > 3 else DEMO_END
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--raw", action="store_true", help="print the raw JSON response")
+    parser.add_argument("--repo", default=str(config.SEED_REPO))
+    args = parser.parse_args()
 
-    lines = (REPO / file_path).read_text().splitlines()
-    code = "\n".join(lines[start - 1 : end])
+    repo = Path(args.repo).resolve()
+    source = (repo / FILE)
+    if not source.is_file():
+        sys.exit(f"{source} not found -- run `make seed` first")
+    code = "".join(source.read_text().splitlines(keepends=True)[START - 1:END])
 
-    resp = httpx.post(
-        f"{SERVICE}/context",
-        json={
-            "code": code,
-            "file_path": file_path,
-            "repo_root": str(REPO),
-            "line_start": start,
-            "line_end": end,
-            "language": "python",
-        },
-        timeout=60,
-    )
+    resp = httpx.post(f"{config.SERVICE_URL}/context", timeout=120, json={
+        "code": code, "file_path": FILE, "repo_root": str(repo),
+        "line_start": START, "line_end": END, "language": "python",
+    })
     resp.raise_for_status()
-    d = resp.json()
 
-    b = d["blame"]
-    print("=" * 74)
-    if b.get("dominant_sha"):
-        print(
-            f"Last touched by {', '.join(b['authors']) or 'unknown'}, "
-            f"{b.get('commit_date')}, "
-            f"{'PR #' + str(b['pr_number']) if b.get('pr_number') else 'no PR'} "
-            f"({b['dominant_sha']})"
-        )
+    if args.raw:
+        print(json.dumps(resp.json(), indent=2))
     else:
-        print("No git history for this selection")
-    print("=" * 74)
-
-    if d.get("message"):
-        print(f"\n  {d['message']}\n")
-
-    if d.get("synthesis"):
-        print("\n" + d["synthesis"] + "\n")
-
-    for i, r in enumerate(d["results"], 1):
-        badge = "  [EXACT MATCH]" if r["match_type"] == "exact" else ""
-        print(f"[{i}] #{r['channel_name']}  {r['date']}  score={r['score']}{badge}")
-        print(f"    who: {', '.join(r['participants'][:5])}")
-        if r["why"]:
-            print(f"    why: {r['why']}")
-        print(f"    {r['summary'][:150]}")
-        print(f"    {r['permalink']}")
-        print()
-
-    print("timing_ms:", json.dumps(d["timing_ms"]))
+        print(render(ContextResponse.model_validate(resp.json()), f"{FILE}:{START}-{END}"))
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

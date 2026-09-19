@@ -2,12 +2,14 @@ __pycache__/
 *.pyc
 .venv/
 .env
+.es_storage/
+# leftover from the pre-merge Qdrant build; safe to delete
 .qdrant_storage/
-.hindsight/
+# 'send to agent' output
+.provenance/
 node_modules/
 extension/out/
 extension/*.vsix
 seed/repo/
 seed/slack/
 .pytest_cache/
-extension/preview.html

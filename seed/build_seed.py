@@ -1,262 +1,351 @@
 #!/usr/bin/env python3
-"""Regenerate the seed workspace from scratch, deterministically.
+"""Deterministic demo corpus generator.
 
-    python seed/build_seed.py
+Writes two things, both disposable and both gitignored -- delete and regenerate
+freely, neither is ever hand-edited:
 
-Writes seed/slack (a Slack workspace export) and seed/repo (a git repo whose
-history is backdated across 18 months). Both are disposable -- you will reset
-and re-ingest many times while tuning, and hand-editing JSON at 4am is where
-projects die.
+  seed/repo/    a real git repository with backdated commits
+  seed/slack/   a Slack workspace export directory
+
+and rewrites `seed/mock_integrations/github_prs.json` so its `commit_shas` carry the
+*actual* short SHAs git produced. The spec's literal fixture lists `8f2a91c` /
+`130e156`; git assigns content-addressed SHAs that cannot be forced to arbitrary
+values, so the fixture is regenerated here instead. Everything else in the fixture
+(PR numbers, titles, authors, dates) is the literal spec content and the PR numbers
+are what every join in the pipeline actually keys on.
+
+Usage:
+    python seed/build_seed.py                 # build repo + slack + fixtures
+    python seed/build_seed.py --append        # append a late reply to an old thread
+    python seed/build_seed.py --with-malformed  # also drop in an unreadable day file
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import shutil
 import subprocess
 import sys
-from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import _repo_files as R
-import _slack_data as S
+import _repo_files as repo_files          # noqa: E402
+import _slack_data as slack_data          # noqa: E402
 
-SEED = Path(__file__).resolve().parent
-SLACK_DIR = SEED / "slack"
-REPO_DIR = SEED / "repo"
+SEED_DIR = Path(__file__).resolve().parent
+REPO_DIR = SEED_DIR / "repo"
+SLACK_DIR = SEED_DIR / "slack"
+FIXTURE_DIR = SEED_DIR / "mock_integrations"
 
-GITHUB_REPO = "https://github.com/acme/acme-platform"
+WORKSPACE = "acme"
+FIRST_MESSAGE_HOUR = 9          # UTC
+MESSAGE_SPACING_SECONDS = 420   # 7 minutes -- well inside SEGMENT_GAP_SECONDS
+
+# --- git repository -----------------------------------------------------------
+
+AUTHORS = {
+    "jordan": ("Jordan Lee", "jordan.lee@acme.example"),
+    "priya": ("Priya Raman", "priya.raman@acme.example"),
+    "mira": ("Mira Cheng", "mira.cheng@acme.example"),
+}
+
+# (author key, ISO date, commit subject, {path: content})
+# Subjects end in `(#NNNN)` so gitctx.py's squash-merge regex resolves the PR.
+COMMITS = [
+    ("mira", "2025-06-01T10:00:00+00:00", "Initial commit", repo_files.BASE_FILES),
+    ("priya", "2025-08-15T11:20:00+00:00", "Raise settlement batch timeout to 90s (#3902)",
+     {"payments/settlement.py": repo_files.PAYMENTS_SETTLEMENT}),
+    ("jordan", "2026-01-18T16:00:00+00:00", "Add webhook retry with 5s backoff (#4100)",
+     {"webhooks/delivery.py": repo_files.DELIVERY_V1}),
+    ("priya", "2026-02-11T14:32:00+00:00", "Fix webhook retry backoff (#4821)",
+     {"webhooks/delivery.py": repo_files.DELIVERY_V2}),
+    ("mira", "2026-03-09T11:15:00+00:00", "Jitter webhook retry backoff (#5012)",
+     {"webhooks/delivery.py": repo_files.DELIVERY_V3}),
+    ("priya", "2026-04-06T09:40:00+00:00", "Bound the webhook retry window (#5233)",
+     {"webhooks/delivery.py": repo_files.DELIVERY_V4}),
+]
+
+# Which commit (by index into COMMITS) each PR's merge produced.
+PR_TO_COMMIT_INDEX = {4100: 2, 4821: 3, 5012: 4, 5233: 5}
 
 
-def iso_to_ts(s: str) -> float:
-    return datetime.fromisoformat(s).timestamp()
+def _git(*args: str, env: dict | None = None) -> str:
+    full_env = {**os.environ, **(env or {})}
+    result = subprocess.run(
+        ["git", "-C", str(REPO_DIR), *args],
+        env=full_env, capture_output=True, text=True, check=True,
+    )
+    return result.stdout.strip()
 
 
-def slack_ts(ts: float, seq: int) -> str:
-    """Slack-style timestamp id. Unique per message, stable across runs."""
-    return f"{int(ts)}.{seq:06d}"
+def build_repo() -> dict[int, str]:
+    """Create `seed/repo` from scratch. Returns {pr_number: short_sha}."""
+    if REPO_DIR.exists():
+        shutil.rmtree(REPO_DIR)
+    REPO_DIR.mkdir(parents=True)
+
+    _git("init", "-q", "-b", "main")
+    _git("config", "user.name", "Provenance Seed")
+    _git("config", "user.email", "seed@acme.example")
+    _git("config", "commit.gpgsign", "false")
+
+    shas: list[str] = []
+    for author_key, iso_date, subject, files in COMMITS:
+        for rel_path, content in files.items():
+            path = REPO_DIR / rel_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+        name, email = AUTHORS[author_key]
+        _git("add", "-A")
+        _git(
+            "commit", "-q", "-m", subject,
+            env={
+                "GIT_AUTHOR_NAME": name, "GIT_AUTHOR_EMAIL": email,
+                "GIT_COMMITTER_NAME": name, "GIT_COMMITTER_EMAIL": email,
+                "GIT_AUTHOR_DATE": iso_date, "GIT_COMMITTER_DATE": iso_date,
+            },
+        )
+        shas.append(_git("rev-parse", "--short=7", "HEAD"))
+
+    print(f"repo:  {REPO_DIR}")
+    for (author_key, iso_date, subject, _), sha in zip(COMMITS, shas):
+        print(f"       {sha}  {iso_date[:10]}  {AUTHORS[author_key][0]:<12}  {subject}")
+    return {pr: shas[idx] for pr, idx in PR_TO_COMMIT_INDEX.items()}
 
 
-# --- Slack export ---------------------------------------------------------
+# --- slack export -------------------------------------------------------------
 
 
-def build_slack() -> None:
+def _day_base_ts(date_str: str) -> float:
+    day = datetime.strptime(date_str, "%Y-%m-%d").replace(
+        hour=FIRST_MESSAGE_HOUR, tzinfo=timezone.utc
+    )
+    return day.timestamp()
+
+
+def _ts_str(base: float, index: int) -> str:
+    """Slack-style timestamp: whole seconds plus a distinct microsecond suffix."""
+    return f"{base + index * MESSAGE_SPACING_SECONDS + (index + 1) / 10000.0:.6f}"
+
+
+def _thread_parent_ts(thread_key: str) -> str:
+    """The ts of a thread's first message -- stable across runs, so `--append` can
+    attach a reply to a thread built by an earlier invocation."""
+    for thread in slack_data.THREADS:
+        if thread["key"] == thread_key:
+            return _ts_str(_day_base_ts(thread["date"]), 0)
+    raise KeyError(f"no thread with key {thread_key!r}")
+
+
+def _message_json(uid: str, text: str, ts: str, thread_ts: str | None, reactions: list[str]) -> dict:
+    msg: dict = {"type": "message", "user": uid, "text": text, "ts": ts}
+    if thread_ts:
+        msg["thread_ts"] = thread_ts
+    if reactions:
+        msg["reactions"] = [{"name": r, "count": 1, "users": [uid]} for r in reactions]
+    return msg
+
+
+def build_slack(with_malformed: bool = False) -> None:
     if SLACK_DIR.exists():
         shutil.rmtree(SLACK_DIR)
     SLACK_DIR.mkdir(parents=True)
 
-    users = [
+    (SLACK_DIR / "users.json").write_text(json.dumps([
         {
-            "id": uid,
-            "name": key,
-            "is_bot": key == "pagerduty",
-            "profile": {"display_name": name, "real_name": name},
+            "id": u["id"],
+            "name": u["name"],
+            "profile": {"display_name": u["display_name"], "real_name": u["display_name"]},
         }
-        for key, (uid, name) in S.USERS.items()
-    ]
-    (SLACK_DIR / "users.json").write_text(json.dumps(users, indent=2))
+        for u in slack_data.USERS
+    ], indent=2))
 
-    channels = [
+    (SLACK_DIR / "channels.json").write_text(json.dumps(
+        [{"id": c["id"], "name": c["name"]} for c in slack_data.CHANNELS], indent=2
+    ))
+    (SLACK_DIR / "channel_tiers.json").write_text(json.dumps(
+        {c["name"]: c["tier"] for c in slack_data.CHANNELS}, indent=2
+    ))
+
+    # One file per channel per day; a day can hold more than one conversation.
+    by_day: dict[tuple[str, str], list[dict]] = {}
+    for thread in slack_data.THREADS:
+        base = _day_base_ts(thread["date"])
+        parent_ts = _ts_str(base, 0)
+        for i, (uid, text, reactions) in enumerate(thread["messages"]):
+            by_day.setdefault((thread["channel"], thread["date"]), []).append(
+                _message_json(
+                    uid, text, _ts_str(base, i),
+                    parent_ts if thread["threaded"] else None,
+                    reactions,
+                )
+            )
+
+    for (channel, date), messages in sorted(by_day.items()):
+        channel_dir = SLACK_DIR / channel
+        channel_dir.mkdir(exist_ok=True)
+        messages.sort(key=lambda m: float(m["ts"]))
+        (channel_dir / f"{date}.json").write_text(json.dumps(messages, indent=2))
+
+    if with_malformed:
+        # Exercises 18 row 25: a day file that cannot be parsed must be skipped
+        # with a log line, not abort the ingest.
+        broken = SLACK_DIR / "eng-general" / "2026-03-06.json"
+        broken.write_text('[{"type": "message", "text": "truncated export')
+        print(f"       (wrote a deliberately malformed day file at {broken.name})")
+
+    total = sum(len(m) for m in by_day.values())
+    print(f"slack: {SLACK_DIR}  ({len(by_day)} day files, {total} messages)")
+
+
+def append_late_reply() -> None:
+    """Append one reply to an already-built, already-indexed thread.
+
+    This is the input `--mode incremental` is judged on: the reply is newer than the
+    checkpoint, but it belongs to a thread whose other messages are not, so a correct
+    incremental run has to rebuild the whole thread rather than index this message
+    alone. See 11.7.
+    """
+    payload = slack_data.APPEND_MESSAGE
+    if not SLACK_DIR.is_dir():
+        sys.exit("no seed/slack yet -- run `python seed/build_seed.py` first")
+
+    parent_ts = _thread_parent_ts(payload["thread_key"])
+    day_file = SLACK_DIR / payload["channel"] / f"{payload['date']}.json"
+    day_file.parent.mkdir(parents=True, exist_ok=True)
+
+    existing = json.loads(day_file.read_text()) if day_file.exists() else []
+    # Idempotent by message text, not by timestamp: the timestamp is derived from the
+    # file's current length, so re-running would otherwise keep appending copies.
+    if any(m.get("text") == payload["text"] for m in existing):
+        print("append: already present, nothing to do")
+        return
+    ts = _ts_str(_day_base_ts(payload["date"]), len(existing))
+
+    existing.append(_message_json(
+        payload["user"], payload["text"], ts, parent_ts, payload["reactions"]
+    ))
+    day_file.write_text(json.dumps(existing, indent=2))
+    print(f"append: +1 message to {day_file.relative_to(SEED_DIR)} "
+          f"(reply on thread {payload['thread_key']}, parent ts {parent_ts})")
+    print("        now run: make ingest-incremental")
+
+
+# --- mock integration fixtures -------------------------------------------------
+
+
+def write_fixtures(pr_shas: dict[int, str]) -> None:
+    FIXTURE_DIR.mkdir(parents=True, exist_ok=True)
+
+    (FIXTURE_DIR / "github_prs.json").write_text(json.dumps([
         {
-            "id": cid,
-            "name": name,
-            "created": int(iso_to_ts("2025-04-01T00:00:00-04:00")),
-            "purpose": {"value": f"#{name}"},
-            "members": [u[0] for u in S.USERS.values()],
-        }
-        for name, (cid, _tier) in S.CHANNELS.items()
-    ]
-    (SLACK_DIR / "channels.json").write_text(json.dumps(channels, indent=2))
-
-    # Not part of a real export. This stands in for the channel-approval
-    # config a deployed Hindsight would own, and drives w_channel.
-    tiers = {name: tier for name, (_cid, tier) in S.CHANNELS.items()}
-    (SLACK_DIR / "channel_tiers.json").write_text(json.dumps(tiers, indent=2))
-
-    # channel -> date -> [message]
-    by_day: dict[str, dict[str, list]] = defaultdict(lambda: defaultdict(list))
-    seq = 0
-
-    for thread in S.THREADS:
-        cname = thread["channel"]
-        reactions = thread.get("reactions", {})
-        t = iso_to_ts(thread["start"])
-        parent_ts = None
-
-        for i, (ukey, gap, text) in enumerate(thread["messages"]):
-            t += gap
-            seq += 1
-            uid, _name = S.USERS[ukey]
-            ts = slack_ts(t, seq)
-            if i == 0:
-                parent_ts = ts
-
-            msg = {"type": "message", "user": uid, "text": text, "ts": ts}
-            if thread.get("threaded"):
-                msg["thread_ts"] = parent_ts
-                if i == 0:
-                    msg["reply_count"] = len(thread["messages"]) - 1
-                else:
-                    msg["parent_user_id"] = S.USERS[thread["messages"][0][0]][0]
-
-            if i in reactions:
-                counts: dict[str, int] = defaultdict(int)
-                for r in reactions[i]:
-                    counts[r] += 1
-                msg["reactions"] = [
-                    {"name": n, "count": c, "users": [S.USERS["mei"][0]]}
-                    for n, c in counts.items()
-                ]
-
-            day = datetime.fromtimestamp(t, tz=timezone.utc).strftime("%Y-%m-%d")
-            by_day[cname][day].append(msg)
-
-    for cname, days in by_day.items():
-        cdir = SLACK_DIR / cname
-        cdir.mkdir(parents=True, exist_ok=True)
-        for day, msgs in days.items():
-            msgs.sort(key=lambda m: float(m["ts"]))
-            (cdir / f"{day}.json").write_text(json.dumps(msgs, indent=2))
-
-    total = sum(len(m) for d in by_day.values() for m in d.values())
-    print(f"slack export: {len(by_day)} channels, {total} messages -> {SLACK_DIR}")
-
-
-# --- git repo -------------------------------------------------------------
-
-AUTHORS = {
-    "priya": ("Priya Raman", "priya.raman@acme.dev"),
-    "dmitri": ("Dmitri Sokolov", "dmitri.sokolov@acme.dev"),
-    "rafa": ("Rafael Costa", "rafael.costa@acme.dev"),
-    "tobi": ("Tobi Adeyemi", "tobi.adeyemi@acme.dev"),
-}
-
-SETTLEMENT_V1 = R.SETTLEMENT.replace("BATCH_SIZE = 500", "BATCH_SIZE = 200")
-
-# (date, author key, subject, {path: content}, branch_merge?)
-COMMITS = [
-    (
-        "2025-04-02T09:41:00-04:00", "priya",
-        "Initial platform skeleton (#4102)",
-        {
-            "README.md": R.README,
-            "webhooks/__init__.py": R.INIT,
-            "webhooks/signing.py": R.SIGNING,
-            "webhooks/delivery.py": R.DELIVERY_V1,
+            "number": 4100,
+            "title": "Add webhook retry with 5s backoff",
+            "author": "jordan-lee",
+            "merged_at": "2026-01-18T16:00:00Z",
+            "files": ["webhooks/delivery.py"],
+            "commit_shas": [pr_shas[4100]],
         },
-        None,
-    ),
-    (
-        "2025-08-20T15:12:00-04:00", "dmitri",
-        "Add settlement batch runner",
-        {"payments/__init__.py": R.INIT, "payments/settlement.py": SETTLEMENT_V1},
-        # A real merge commit, so SHA->PR strategy 2 has something to resolve.
-        ("settlement-batch", 4390),
-    ),
-    (
-        "2025-11-05T11:03:00-05:00", "tobi",
-        "Add merchant search index refresh (#4512)",
-        {"search/__init__.py": R.INIT, "search/indexer.py": R.INDEXER},
-        None,
-    ),
-    (
-        # THE commit. git blame over the retry loop resolves here, which
-        # resolves to #4821, which Slack thread B references by URL.
-        "2026-02-11T16:28:00-05:00", "priya",
-        "Reduce webhook retry backoff to 7s (#4821)",
-        {"webhooks/delivery.py": R.DELIVERY_V2},
-        None,
-    ),
-    (
-        "2026-07-08T10:15:00-04:00", "rafa",
-        "Raise settlement batch size to 500 rows (#5012)",
-        {"payments/settlement.py": R.SETTLEMENT},
-        None,
-    ),
-    (
-        # Nothing in Slack discusses this. It is the null-handling demo beat.
-        "2026-08-26T14:02:00-04:00", "tobi",
-        "Add string helpers (#5188)",
-        {"utils/__init__.py": R.INIT, "utils/strings.py": R.STRINGS},
-        None,
-    ),
-]
+        {
+            "number": 4821,
+            "title": "Fix webhook retry backoff",
+            "author": "priya-raman",
+            "merged_at": "2026-02-11T14:32:00Z",
+            "files": ["webhooks/delivery.py"],
+            "commit_shas": [pr_shas[4821]],
+        },
+        {
+            "number": 5012,
+            "title": "Jitter webhook retry backoff",
+            "author": "mira-cheng",
+            "merged_at": "2026-03-09T11:15:00Z",
+            "files": ["webhooks/delivery.py"],
+            "commit_shas": [pr_shas[5012]],
+        },
+        {
+            "number": 5233,
+            "title": "Bound the webhook retry window",
+            "author": "priya-raman",
+            "merged_at": "2026-04-06T09:40:00Z",
+            "files": ["webhooks/delivery.py"],
+            "commit_shas": [pr_shas[5233]],
+        },
+    ], indent=2) + "\n")
 
+    (FIXTURE_DIR / "tickets.json").write_text(json.dumps([
+        {
+            "key": "ENG-4821",
+            "title": "Webhook duplicate deliveries during merchant failover",
+            "status": "Done",
+            "assignee": "Priya Raman",
+            "pr_number": 4821,
+        },
+        {
+            "key": "ENG-5012",
+            "title": "Retry burst knocks merchants over on recovery",
+            "status": "Done",
+            "assignee": "Mira Cheng",
+            "pr_number": 5012,
+        },
+        {
+            "key": "ENG-5233",
+            "title": "Delivery workers pinned during multi-merchant outage",
+            "status": "In Review",
+            "assignee": "Priya Raman",
+            "pr_number": 5233,
+        },
+    ], indent=2) + "\n")
 
-def git(*args: str, env: dict | None = None) -> str:
-    full = {**os.environ, **(env or {})}
-    out = subprocess.run(
-        ["git", "-C", str(REPO_DIR), *args],
-        check=True, capture_output=True, text=True, env=full,
-    )
-    return out.stdout.strip()
+    (FIXTURE_DIR / "sentry_issues.json").write_text(json.dumps([
+        {
+            "id": "WEBHOOK-184",
+            "title": "Duplicate webhook delivery spike during failover window",
+            "first_seen": "2026-01-25T09:12:00Z",
+            "status": "resolved",
+            "pr_number": 4821,
+        },
+        {
+            "id": "WEBHOOK-201",
+            "title": "Merchant endpoint 503s in a burst immediately after recovery",
+            "first_seen": "2026-03-02T04:41:00Z",
+            "status": "resolved",
+            "pr_number": 5012,
+        },
+        {
+            "id": "WEBHOOK-233",
+            "title": "Delivery worker pool saturated, queue depth climbing",
+            "first_seen": "2026-03-30T22:05:00Z",
+            "status": "unresolved",
+            "pr_number": 5233,
+        },
+    ], indent=2) + "\n")
 
-
-def commit_env(iso: str, author_key: str) -> dict:
-    name, email = AUTHORS[author_key]
-    # Backdate both. Time weighting is invisible if every commit is today.
-    return {
-        "GIT_AUTHOR_DATE": iso,
-        "GIT_COMMITTER_DATE": iso,
-        "GIT_AUTHOR_NAME": name,
-        "GIT_AUTHOR_EMAIL": email,
-        "GIT_COMMITTER_NAME": name,
-        "GIT_COMMITTER_EMAIL": email,
-    }
-
-
-def write_files(files: dict[str, str]) -> None:
-    for rel, content in files.items():
-        p = REPO_DIR / rel
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content)
-
-
-def build_repo() -> None:
-    if REPO_DIR.exists():
-        shutil.rmtree(REPO_DIR)
-    REPO_DIR.mkdir(parents=True)
-    git("init", "-q", "-b", "main")
-    git("config", "user.name", "Seed")
-    git("config", "user.email", "seed@acme.dev")
-    git("config", "commit.gpgsign", "false")
-    git("remote", "add", "origin", f"{GITHUB_REPO}.git")
-
-    for iso, author, subject, files, merge in COMMITS:
-        env = commit_env(iso, author)
-        if merge is None:
-            write_files(files)
-            git("add", "-A")
-            git("commit", "-q", "-m", subject, env=env)
-            continue
-
-        branch, pr = merge
-        git("checkout", "-q", "-b", branch)
-        write_files(files)
-        git("add", "-A")
-        git("commit", "-q", "-m", subject, env=env)
-        git("checkout", "-q", "main")
-        git(
-            "merge", "--no-ff", "-q", branch,
-            "-m", f"Merge pull request #{pr} from acme/{branch}\n\n{subject}",
-            env=env,
-        )
-        git("branch", "-q", "-D", branch)
-
-    log = git("log", "--format=%h %ad %an %s", "--date=short")
-    print(f"git repo -> {REPO_DIR}")
-    for line in log.splitlines():
-        print("  " + line)
+    print(f"mocks: {FIXTURE_DIR}  (commit_shas bound to the real SHAs above)")
+    print("       note: PR #3902 and #3455 are referenced in Slack but absent from the")
+    print("       fixtures on purpose -- that is 18 row 23, adapters return [] and")
+    print("       graph.py simply adds no node.")
 
 
 def main() -> None:
-    build_slack()
-    build_repo()
-    print("\nseed ready. next: make ingest")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--append", action="store_true",
+                        help="append a late reply to an existing thread (incremental test)")
+    parser.add_argument("--with-malformed", action="store_true",
+                        help="also write an unreadable day file, to exercise ingest resilience")
+    args = parser.parse_args()
+
+    if args.append:
+        append_late_reply()
+        return
+
+    pr_shas = build_repo()
+    build_slack(with_malformed=args.with_malformed)
+    write_fixtures(pr_shas)
+    print("\nseed complete. next: make es && make ingest")
 
 
 if __name__ == "__main__":

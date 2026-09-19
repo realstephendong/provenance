@@ -1,148 +1,231 @@
-# Hindsight
+# Provenance
 
-Highlight a block of code in VSCode and get back the Slack conversations that
-explain why it is the way it is.
+Select a block of code in VS Code and recover the full evidence chain behind it: the
+commit that wrote it, the PR that commit belongs to, the Slack threads that discuss
+that PR, the ticket that tracked it, the incident it may have caused — and, if the
+evidence disagrees with itself, an explicit statement of what conflicts and what
+superseded what.
 
-The architectural idea that makes this more than a RAG demo: **we join git
-history to Slack.** `git blame` gives the commit that touched the selected
-lines, the commit gives a PR number, and Slack messages mention PR numbers.
-That is an exact match, not a similarity score. Semantic search fills the
-remaining slots.
+This is not "search Slack for similar words". It is a join across independent systems
+(git, Slack, GitHub, a ticket tracker, an error tracker) that becomes **exact**
+wherever those systems agree by construction — a commit SHA, a PR number — and falls
+back to ranked semantic search only where they don't.
+
+Three surfaces, one backend contract (`POST /context`):
+
+| Surface | Entry point |
+|---|---|
+| VS Code extension | select code → `cmd+alt+w` / `ctrl+alt+w` |
+| MCP server | a coding agent calls `search_team_context` mid-task |
+| Terminal CLI | `provenance explain webhooks/delivery.py:20-40` |
+
+None of the three contains its own retrieval logic. They all consume the identical
+`ContextResponse`.
+
+---
 
 ## Quick start
 
 ```bash
-make install          # venv on python3.12 + deps
-cp .env.example .env  # then put your OPENAI_API_KEY in it -- required
-make qdrant           # Qdrant in Docker on :6333
-make seed             # generate the Slack export + backdated git repo
-make ingest           # index the corpus
+make install          # python3.12 venv + deps   (override: make install PYTHON=python3.13)
+cp .env.example .env  # then add your OPENAI_API_KEY
+make es               # Elasticsearch 8.17 via docker compose
+make seed             # generate seed/repo + seed/slack deterministically
+make ingest           # Slack export -> Elasticsearch (uses the OpenAI API)
 make serve            # FastAPI on :8000
 ```
 
-Then in another shell:
+Then, in another shell:
 
 ```bash
-python scripts/demo_request.py   # the canonical demo query, as text
-python evals/run_eval.py         # 5 fixed queries, pass/fail
+make eval                          # the objective signal — run this after any change
+python scripts/demo_request.py     # one canned request, rendered
 ```
 
-For the extension: `make extension`, open `extension/` in VSCode, press F5.
-The launch config opens `seed/repo` in the dev host. Select lines 23-68 of
-`webhooks/delivery.py` and press `cmd+alt+w`.
+For the extension: `make extension`, then open `extension/` in VS Code and press F5.
 
-### An API key is required
+### Requirements
 
-`OPENAI_API_KEY` is mandatory. The ingest CLI, the service and the MCP server
-each check for it at startup and refuse to run without one, rather than
-failing on the first query.
+- **Python 3.12+**, **Node.js**, **Docker** (Elasticsearch only).
+- **`OPENAI_API_KEY` is required.** Every entrypoint refuses to boot without it.
+  There is deliberately no offline or fake-LLM mode: it produces plausible-looking
+  output with meaningless content, which silently corrupts every downstream quality
+  signal. If you need to work without network access, the parts that make zero LLM
+  calls are `service/gitctx.py`, the exact retrieval tier, `service/graph.py`, and
+  the extension and CLI rendering layers.
+- **`SENTRY_DSN` is optional.** Unset, `observability.py` no-ops every call.
 
-There was briefly a fake-LLM mode for working offline. It was removed on
-purpose: it let the whole pipeline go green while the summaries, the rerank
-and the synthesis were all placeholder text, which made every eval number a
-lie. If you need to work without network access, work on the parts that need
-no model — the exact-match tier, `git blame`, PR resolution and the panel all
-run without one.
+---
 
-## The demo path
+## How a request works
 
-The one sequence that has to work, end to end, offline-safe, under 8 seconds:
+```
+POST /context
+  ├─ git.blame      ─┐  concurrent
+  ├─ query_build    ─┘  code → engineering prose (LLM) + symbols (regex)
+  ├─ retrieve          exact tier (PR/SHA/path) + semantic tier (kNN ⊕ BM25, RRF)
+  │                    └─ null threshold: short-circuit before spending rerank tokens
+  ├─ rerank            LLM relevance pass — exact hits rescued unconditionally
+  ├─ synthesis         cited answer + conflict/supersede detection (one JSON call)
+  └─ resolve_graph     deterministic entity resolution, no LLM, no network
+```
 
-1. Open `seed/repo` in VSCode, go to `webhooks/delivery.py`.
-2. Select lines 23-68 — the retry loop with `RETRY_BACKOFF_SECONDS = 7` and
-   the enterprise-tier special case. Nothing in the code says why either
-   exists.
-3. `cmd+alt+w`. The panel opens beside the editor.
-4. Header: `Last touched by Priya Raman, 2026-02-11, PR #4821 (130e156)`.
-5. Synthesis paragraph with `[1]`/`[2]` citations, then result cards.
-6. At least one card carries an **Exact match** badge, because that thread
-   references PR #4821 — the PR that wrote those exact lines.
-7. "Send to agent" copies the context to the clipboard and appends it to
-   `.hindsight/context.md`.
+Those six names are also the Sentry span names, so the trace matches the diagram.
 
-The corpus is built backwards from that moment. The story it tells, which no
-code comment states: 7 seconds is pinned between a 6.2s merchant load-balancer
-failover p99 and the 8s implied by a 40s contractual delivery ceiling. Move it
-either way and something breaks.
+### The four ideas that matter
 
-Second demo beat: run the same query through the MCP server so a coding agent
-pulls the context autonomously, mid-task, without anyone clicking anything.
+1. **Elasticsearch is the only context/vector store.** It supplies BM25, dense kNN,
+   RRF fusion, filtering, and the relevance-weighting math. No second store.
+2. **Code is never embedded directly against Slack prose.** Code is rewritten into
+   engineering prose by an LLM first, and *that* is embedded. Identifiers are
+   extracted separately and carry the lexical channel. Both sides of the comparison
+   are rewritten into the same register before they ever meet.
+3. **Structural evidence outranks inferred evidence, unconditionally.** If git proves
+   a commit belongs to PR #4821 and a Slack thread names PR #4821, that relationship
+   is asserted, not scored. If the reranker calls it irrelevant, it is kept anyway.
+4. **The system says "no relevant context" rather than fabricate one.** Enforced
+   independently at three layers: the retrieval null threshold, the rerank pass, and
+   the synthesis prompt.
+
+---
+
+## Ingest modes
+
+```bash
+make ingest              # backfill  (--recreate drops and rebuilds the index)
+make ingest-incremental  # only what changed since the checkpoint
+make reconcile           # drift detection between export and index
+```
+
+`--mode incremental` is the one with a real correctness trap in it. Filtering
+messages to `ts > checkpoint` and segmenting only those is **wrong**: a reply arriving
+today on a three-week-old thread would be segmented in isolation and would overwrite
+the real, larger thread with a truncated summary. So the incremental run expands new
+messages to *affected* ones — the full thread, or the full burst — and rebuilds those
+completely. Cost stays proportional to affected threads, not corpus size, and the
+deterministic document id makes the re-index a transparent overwrite.
+
+`--mode reconcile` classifies every unit as `missing` / `changed` / `stale` by content
+hash, reprocesses the first two, and deletes the third.
+
+**Deliberately not built:** a live Slack connection — no OAuth, no Events API webhook
+receiver. Ingest reads a static export directory. This is a scope boundary, not an
+oversight: the backfill/incremental/reconcile lifecycle around that export is the part
+of a real ingestion system that's actually worth demonstrating, and it doesn't need
+live infrastructure. `--mode incremental` and `--mode reconcile` against a refreshed
+export are the substitute mechanism.
+
+---
+
+## The seed corpus
+
+`make seed` regenerates `seed/repo` (a real git repo with backdated commits) and
+`seed/slack` (a Slack export) from `seed/_repo_files.py` and `seed/_slack_data.py`.
+Both are gitignored and neither is ever hand-edited — delete and regenerate freely.
+
+The story it encodes:
+
+| When | What |
+|---|---|
+| 2026-01-12 | `#eng-payments` — Jordan proposes a 5s retry backoff |
+| 2026-01-18 | PR #4100 merges: `RETRY_BACKOFF_SECONDS = 5` |
+| 2026-01-25 | WEBHOOK-184 fires; ENG-4821 opens |
+| 2026-01-28 | `#eng-incidents` — "5s was still inside the failover window … went with 7s (#4821)" |
+| 2026-02-11 | PR #4821 merges: `RETRY_BACKOFF_SECONDS = 7` |
+| 2026-04-02 | `#eng-incidents` — 7s held through the April failover |
+
+Selecting `webhooks/delivery.py:20-40` should recover all of it, *and* report that the
+2026-01-12 proposal was superseded by the 2026-01-28 decision.
+
+The corpus also contains two distractors with deliberately overlapping vocabulary
+(`search/indexer.py` retry logic, `webhooks/signing.py` secret rotation) and one file
+with no Slack evidence at all — `utils/strings.py`, the null case. Without those, the
+null-threshold and exact-vs-semantic evals would mean nothing.
+
+Two PR numbers referenced in Slack (#3902, #3455) are intentionally absent from the
+mock fixtures, which exercises the "adapter has no match" path: the adapters return
+empty, and the graph simply omits the node.
+
+```bash
+python seed/build_seed.py --append           # a late reply, to test incremental
+python seed/build_seed.py --with-malformed   # an unreadable day file, to test resilience
+```
+
+---
+
+## Evals
+
+```bash
+make eval        # the full suite against a running service
+make calibrate   # suggest a NULL_THRESHOLD for your actual corpus
+```
+
+The suite checks that expected evidence appears and at what rank, that the null case
+returns zero results and a message, and that the conflict case produces both a
+non-empty `conflicts` list and a `CONFLICTS_WITH`/`SUPERSEDES` edge in the graph.
+
+`NULL_THRESHOLD` in `config.py` ships as a **starting point, not a fact**. Calibrate
+it against your own ingested corpus before trusting it: `make calibrate` prints the
+best null score and the worst still-relevant score and suggests their midpoint.
+
+> Any change to a prompt, a weight in `config.py`, or the Elasticsearch query shape
+> must be verified against this harness before being trusted. It is the only
+> objective signal in the project.
+
+---
+
+## Configuration
+
+Everything tunable lives in `provenance/config.py`. Two flags pick between
+implementation strategies without touching any caller:
+
+- **`ES_USE_NATIVE_RRF`** — `True` uses Elasticsearch's native `retriever`/`rrf`
+  combinator (8.16+, licence-gated). `False` issues a `knn` search and a `match`
+  search separately and fuses them with Python-side RRF (`k=60`). Both produce
+  identical output shapes.
+- **`ES_USE_NATIVE_FUNCTION_SCORE`** — `True` applies the relevance weights
+  server-side; `False` applies the identical weights in Python to the fused score.
+  See the note at the top of `service/retrieve.py`: Elasticsearch cannot nest a
+  `retriever` inside a `function_score`, nor apply one to a `knn` query, so the
+  server-side path weights the lexical channel and the Python path weights both.
+  The weights are never applied twice on either path.
+
+The relevance weights themselves: Gaussian time decay around the commit
+(**symmetric on purpose** — a "this broke prod" thread from *after* the commit is
+often the most valuable evidence there is, and must not be penalised more than a
+pre-commit thread the same distance away), an author-match boost when a blame author
+participated in the thread, a channel-tier weight, and a bookmark-reaction boost.
+
+---
 
 ## Layout
 
 ```
-hindsight/
-  config.py          every tunable, in one place
-  llm.py             the only module that talks to a provider
-  models.py          the frozen /context contract
-  ingest/            export reader, segmentation, extraction, summary, embed, load
-  service/           gitctx, query_build, retrieve, rerank, FastAPI
-  mcp_server/        stdio MCP, one tool, wraps /context
-extension/           VSCode extension (thin: selection -> POST -> webview)
-seed/                build_seed.py generates the Slack export and the git repo
-evals/               5 fixed queries with expected threads
+provenance/
+  config.py          every tunable constant
+  models.py          the frozen contract shared by all four surfaces
+  llm.py             the only module that calls OpenAI
+  observability.py   Sentry, no-op when unconfigured
+  integrations/      mocked GitHub / tickets / incidents, as real adapter interfaces
+  ingest/            export -> Elasticsearch, three modes
+  service/           the live /context pipeline
+  mcp_server/        MCP stdio server
+  cli/               terminal surface
+extension/           VS Code extension (TypeScript)
+seed/                deterministic demo corpus generator
+evals/               the eval harness
 ```
 
-## How retrieval works
-
-**Ingest.** Threads group by `thread_ts`; leftover top-level messages split on
-a 45-minute gap. Units under 3 messages are dropped unless a trigger emoji
-marks them. Regex pulls PR numbers, SHAs, tickets, file paths and symbols. One
-LLM call per thread writes the summary that gets dense-embedded; BM25 covers
-summary + raw text + symbols.
-
-**Query.** Never embed raw code against Slack prose — different modalities in
-one vector space produce thematically adjacent noise. Instead: rewrite the
-code into prose with an LLM (dense channel), and extract identifiers (sparse
-channel). `git blame` runs concurrently and resolves to PR numbers via two
-strategies (squash subject `(#1234)`, then merge-commit ancestry).
-
-**Retrieval.** Tier 1 is a filter-only Qdrant query on `pr_refs`,
-`commit_shas` and `file_paths` — no vector involved, capped at 2 so it cannot
-crowd out the rest. Tier 2 is a hybrid dense+sparse query fused with RRF.
-Scores are then adjusted:
-
-```
-score_final = score_fused × w_time × w_author × w_channel × w_react
-```
-
-`w_time` is a **two-sided** Gaussian around the commit date, σ = 60 days,
-floored at 0.3. Deliberately two-sided: threads *before* the commit explain
-intent, threads *after* explain consequences, and the post-hoc "this broke
-prod" thread is often the most valuable result. A hard cutoff at commit time
-throws those away.
-
-## Deviations from the handoff
-
-Four, all forced or defensive:
-
-1. **`mcp/` is `mcp_server/`.** A local package named `mcp` shadows the `mcp`
-   PyPI package and breaks the import.
-2. **`FastMCP` is `MCPServer`.** The handoff targets mcp 1.x. On the installed
-   2.x that class was renamed. Same decorator, same stdio transport.
-3. **Null handling keys on absolute cosine, not the normalized fused score.**
-   RRF is rank-based and scale-free: normalizing it makes the top hit always
-   1.0, so a threshold on it can never fire. `semantic_hits` takes one extra
-   dense-only Qdrant pass to get a real cosine, and `NULL_THRESHOLD = 0.35`
-   applies to that.
-4. **CodeLens calls `/context/count`, not `/context`.** Retrieval only, no
-   rerank and no synthesis. Routing it at `/context` would triple the LLM
-   calls for one file open, which is exactly what makes CodeLens feel slow.
-   It is still off by default (`hindsight.codeLens`).
-
-## Traps, and what was done about them
-
-| Trap | Status |
-|---|---|
-| Slack API rate limits | Export path only. The API reader is not built; see the note in `slack_source.py` before building one. |
-| Tree-sitter setup | Regex fallback ships behind `extract_symbols(code, language)`. Tree-sitter is a drop-in swap. |
-| Embedding dimension mismatch | The collection records its embedder id; `retrieve.check_embedder` refuses to query a collection built by a different one. |
-| `git blame` on uncommitted lines | Detected, reported as `blame.uncommitted`, falls back to pure semantic with no time anchor. |
-| VSCode dev loop | `node extension/scripts/render_preview.js` renders the real panel HTML to a file, no extension host needed. |
-| Tuning by vibes | `evals/run_eval.py` — 5 fixed queries, expected threads, hit positions, under a second. |
+External systems beyond git and Slack are mocked — but as **real adapter interfaces
+with fake data behind them**, not special-cased inline logic. Every one exposes
+`lookup_by_pr(pr_number)`. Swapping in a live API means replacing one function body;
+no caller changes.
 
 ## Non-goals
 
-Live Slack OAuth and the channel-approval UI, incremental re-indexing,
-reaction webhooks, multi-repo support, auth on the service, embedding-based
-topic-shift segmentation, persistence beyond Qdrant.
+Live Slack OAuth and Events API webhooks; a channel-approval UI; real
+GitHub/ticket/error-tracker APIs (mocked by design, not by omission); multi-repository
+support; auth on the FastAPI service; embedding-based topic-shift segmentation;
+an offline/fake-LLM mode; a second retrieval implementation for the terminal or MCP
+path; production-scale reconciliation sharding; fuzzy cross-source identity resolution
+for `Person` nodes (name-string matching only).

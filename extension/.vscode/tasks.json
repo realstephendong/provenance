@@ -4,8 +4,9 @@
     {
       "type": "npm",
       "script": "compile",
-      "problemMatcher": "$tsc",
-      "group": { "kind": "build", "isDefault": true }
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": ["$tsc"],
+      "presentation": { "reveal": "silent" }
     }
   ]
 }

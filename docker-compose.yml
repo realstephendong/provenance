@@ -1,15 +1,20 @@
-# Qdrant only. Everything else runs on the host so the edit loop stays fast.
+# Local dev only. `xpack.security.enabled=false` means no auth and no TLS -- that is
+# acceptable because this container is never exposed beyond localhost for the demo.
+# Flag this explicitly if it ever runs anywhere but a laptop.
 services:
-  qdrant:
-    image: qdrant/qdrant:v1.15.1
-    container_name: hindsight-qdrant
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.17.0
+    container_name: provenance-es
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms1g -Xmx1g"
     ports:
-      - "6333:6333"   # REST + dashboard at http://localhost:6333/dashboard
-      - "6334:6334"   # gRPC
+      - "9200:9200"
     volumes:
-      - ./.qdrant_storage:/qdrant/storage
+      - ./.es_storage:/usr/share/elasticsearch/data
     healthcheck:
-      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
       interval: 5s
       timeout: 3s
-      retries: 20
+      retries: 30
