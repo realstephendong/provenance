@@ -1,0 +1,92 @@
+{
+  "name": "provenance",
+  "displayName": "Provenance",
+  "description": "Recover the evidence chain behind a piece of code: the commit, the PR, the Slack threads, the ticket, the incident.",
+  "version": "1.0.0",
+  "publisher": "provenance",
+  "private": true,
+  "license": "MIT",
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "provenance",
+          "title": "Provenance",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "provenance": [
+        {
+          "type": "webview",
+          "id": "provenance.view",
+          "name": "Evidence",
+          "visibility": "visible"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "provenance.explain",
+        "title": "Provenance: Explain Selected Code"
+      },
+      {
+        "command": "provenance.explainRange",
+        "title": "Provenance: Explain Range"
+      },
+      {
+        "command": "provenance.refresh",
+        "title": "Provenance: Re-explain Selected Code (bypass cache)"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "provenance.explain",
+        "key": "ctrl+alt+w",
+        "mac": "cmd+alt+w",
+        "when": "editorHasSelection"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "provenance.explain",
+          "when": "editorHasSelection",
+          "group": "navigation@99"
+        }
+      ],
+      "commandPalette": [
+        { "command": "provenance.explainRange", "when": "false" }
+      ]
+    },
+    "configuration": {
+      "title": "Provenance",
+      "properties": {
+        "provenance.serviceUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8000",
+          "description": "Base URL of the Provenance service."
+        },
+        "provenance.codeLens": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show a 'N discussions' lens above top-level declarations. Costs one HTTP request per declaration per file open (cached per document, invalidated on edit)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.4.0"
+  }
+}
