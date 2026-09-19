@@ -4,7 +4,7 @@ PYTHON ?= python3.12
 PY := .venv/bin/python
 
 .PHONY: install es seed ingest ingest-incremental reconcile serve mcp eval calibrate \
-        extension demo clean slack-check ingest-slack ingest-slack-incremental reconcile-slack test
+        extension demo clean slack-check ingest-slack ingest-slack-incremental reconcile-slack
 
 install:
 	$(PYTHON) -m venv .venv
@@ -41,9 +41,6 @@ ingest-slack-incremental:
 
 reconcile-slack:
 	$(PY) -m provenance.ingest --source slack --mode reconcile
-
-test:
-	$(PY) -m pytest tests -q
 
 serve:
 	.venv/bin/uvicorn provenance.service.main:app --reload --port 8000

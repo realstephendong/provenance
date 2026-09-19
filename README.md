@@ -178,7 +178,6 @@ a deletion, or a channel newly added to `SLACK_CHANNEL_IDS` is picked up by `rec
 - Message text is sent to OpenAI (summaries and embeddings) and stored in your local
   Elasticsearch, which runs with security disabled (`docker-compose.yml`). That is fine
   for your own machine; do not point it at a shared server.
-- Tests: `pip install -r requirements-dev.txt && make test` (no network needed).
 
 ---
 
