@@ -9,9 +9,10 @@ trusted when the surrounding text is code-adjacent, so every thread that referen
 PR by number also carries a github.com URL or the literal token "PR" somewhere in the
 same unit. That is deliberate, not incidental.
 
-Three of these threads are the demo spine (the 5s -> 7s retry backoff story). Three
-are distractors with overlapping vocabulary but a different subject. `utils/strings.py`
-is discussed nowhere at all -- it is the null case the eval suite asserts on.
+Five of these threads are the demo spine (the 5s -> 7s -> jittered -> bounded-window
+retry backoff story, across #4100, #4821, #5012 and #5233). Three are distractors with
+overlapping vocabulary but a different subject. `utils/strings.py` is discussed
+nowhere at all -- it is the null case the eval suite asserts on.
 """
 
 from __future__ import annotations
@@ -113,6 +114,66 @@ THREADS: list[dict] = [
             ("U0MIRA",
              "Marking WEBHOOK-184 resolved then. Worth leaving the comment in "
              "`webhooks/delivery.py` so nobody trims it back to 5s next quarter.",
+             []),
+        ],
+    },
+    {
+        "key": "retry-jitter",
+        "channel": "eng-incidents",
+        "date": "2026-03-02",
+        "threaded": True,
+        "messages": [
+            ("U0MIRA",
+             "WEBHOOK-201: every queued delivery for a merchant fires at exactly "
+             "the same instant once it recovers, because they were all waiting on "
+             "the same fixed 7s in `RETRY_BACKOFF_SECONDS`. The burst is enough to "
+             "503 the endpoint right after it comes back up.",
+             ["warning"]),
+            ("U0SAM",
+             "Confirmed on the timeline — recovery, then a spike of near-simultaneous "
+             "retries, then the second failure a few hundred ms later. Classic "
+             "thundering herd.",
+             []),
+            ("U0MIRA",
+             "Adding random jitter on top of the 7s floor in "
+             "`webhooks/delivery.py`, `RETRY_JITTER_SECONDS`. Floor stays at 7s so "
+             "we don't reopen ENG-4821 — this only ever adds delay, never removes it. "
+             "PR is <https://github.com/acme/payments/pull/5012|#5012>.",
+             []),
+            ("U0PRIYA",
+             "Good, as long as the failover-window guarantee from #4821 still holds "
+             "at the floor. Tracking as ENG-5012.",
+             []),
+        ],
+    },
+    {
+        "key": "retry-window-bound",
+        "channel": "eng-incidents",
+        "date": "2026-03-30",
+        "threaded": True,
+        "messages": [
+            ("U0PRIYA",
+             "WEBHOOK-233: during the multi-merchant outage last night the delivery "
+             "worker pool saturated completely. Four attempts at 7-9.5s each plus a "
+             "10s timeout per attempt means one dead merchant can pin a worker for "
+             "close to 40s, and with several merchants down at once the pool never "
+             "drained.",
+             ["rotating_light"]),
+            ("U0JORDAN",
+             "So the jitter from #5012 helped the thundering-herd case but made the "
+             "worst case slightly worse per-worker.",
+             []),
+            ("U0PRIYA",
+             "Right. Adding `MAX_RETRY_WINDOW_SECONDS` in `webhooks/delivery.py` — "
+             "45s ceiling on the whole retry sequence for one delivery, not per "
+             "attempt. Once the budget's gone we bail and let the queue pick it up "
+             "later instead of holding the worker. PR "
+             "<https://github.com/acme/payments/pull/5233|#5233>, tracking as "
+             "ENG-5233.",
+             []),
+            ("U0SAM",
+             "Makes sense — the queue already retries independently, so bailing "
+             "early doesn't lose the delivery, just moves who's holding it.",
              []),
         ],
     },

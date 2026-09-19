@@ -5,5 +5,19 @@
     "status": "Done",
     "assignee": "Priya Raman",
     "pr_number": 4821
+  },
+  {
+    "key": "ENG-5012",
+    "title": "Retry burst knocks merchants over on recovery",
+    "status": "Done",
+    "assignee": "Mira Cheng",
+    "pr_number": 5012
+  },
+  {
+    "key": "ENG-5233",
+    "title": "Delivery workers pinned during multi-merchant outage",
+    "status": "In Review",
+    "assignee": "Priya Raman",
+    "pr_number": 5233
   }
 ]

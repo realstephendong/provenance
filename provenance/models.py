@@ -57,6 +57,23 @@ class Result(BaseModel):
     raw_text: str = ""
 
 
+class CommitInfo(BaseModel):
+    """One commit that owns at least one line of the selected range.
+
+    `BlameInfo` already carried the *set* of touching commits in `all_shas`, but
+    flattened away which author, which date and which PR belonged to which commit --
+    so the graph could only ever draw the dominant one. This is that lost detail.
+    """
+
+    sha: str                        # short (7)
+    author: str | None = None
+    date: str | None = None         # YYYY-MM-DD
+    ts: float | None = None
+    lines: int = 0                  # lines of the selection this commit owns
+    pr_number: int | None = None
+    dominant: bool = False          # owns the most lines of the range
+
+
 class BlameInfo(BaseModel):
     authors: list[str] = Field(default_factory=list)
     dominant_sha: str | None = None
@@ -66,6 +83,10 @@ class BlameInfo(BaseModel):
     commit_date: str | None = None
     commit_ts: float | None = None
     uncommitted: bool = False
+    # Per-commit detail, most lines first. The scalar fields above describe
+    # `commits[0]` and are kept because the CLI, the MCP server and the extension
+    # header all read them.
+    commits: list[CommitInfo] = Field(default_factory=list)
 
 
 class GraphNode(BaseModel):

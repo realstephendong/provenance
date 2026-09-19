@@ -13,7 +13,8 @@ import subprocess
 from collections import Counter
 from datetime import datetime, timezone
 
-from ..models import BlameInfo
+from ..integrations import github
+from ..models import BlameInfo, CommitInfo
 
 UNCOMMITTED_SHA = "0" * 40
 
@@ -61,14 +62,18 @@ def _parse_porcelain(output: str) -> tuple[Counter, dict[str, dict]]:
 def sha_to_pr(repo_root: str, sha: str) -> int | None:
     """Resolve a commit to its pull request.
 
-    Two strategies, in order: the squash-merge subject convention (`... (#4821)`),
-    then merge-commit ancestry (`Merge pull request #4821 ...`). Returns None when
-    neither applies -- plenty of commits genuinely have no PR.
+    Three strategies, in order: the squash-merge subject convention (`... (#4821)`),
+    then merge-commit ancestry (`Merge pull request #4821 ...`), then the GitHub
+    adapter's own sha->PR index. The first two read only local git, so they work with
+    no network and no credentials; the third catches the case both conventions miss --
+    a rebase-merged commit, whose subject keeps no PR marker and which no merge commit
+    is an ancestor of. Returns None when all three fail; plenty of commits genuinely
+    have no PR.
     """
     try:
         subject = _git(repo_root, "log", "-1", "--format=%s", sha).strip()
     except Exception:
-        return None
+        subject = ""
     match = _SQUASH_SUBJECT.search(subject)
     if match:
         return int(match.group(1))
@@ -79,12 +84,19 @@ def sha_to_pr(repo_root: str, sha: str) -> int | None:
             "--format=%H %s", f"{sha}..HEAD",
         )
     except Exception:
-        return None
+        ancestry = ""
     for line in ancestry.splitlines():
         match = _MERGE_SUBJECT.search(line)
         if match:
             return int(match.group(1))
-    return None
+
+    # Last resort: ask the forge. Never raises past here -- the adapter returns None
+    # on a miss and swallows its own transport errors.
+    try:
+        pr = github.lookup_by_sha(sha)
+    except Exception:
+        return None
+    return pr.get("number") if pr else None
 
 
 def blame(repo_root: str, file_path: str, line_start: int, line_end: int) -> BlameInfo:
@@ -109,35 +121,50 @@ def blame(repo_root: str, file_path: str, line_start: int, line_end: int) -> Bla
     if not committed:
         return BlameInfo(uncommitted=True)
 
-    dominant_full, _ = committed.most_common(1)[0]
-    ordered_shas = [sha for sha, _ in committed.most_common()]
+    # most_common() orders by lines owned, so the dominant commit is simply the first.
+    ordered = committed.most_common()
+    dominant_full = ordered[0][0]
+
+    def _date(ts: float | None) -> str | None:
+        return (
+            datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
+            if ts else None
+        )
+
+    commits: list[CommitInfo] = []
+    for full_sha, lines in ordered:
+        info = meta.get(full_sha, {})
+        ts = info.get("author_time")
+        commits.append(CommitInfo(
+            sha=full_sha[:7],
+            author=info.get("author"),
+            date=_date(ts),
+            ts=ts,
+            lines=lines,
+            # One resolution per commit, reused below -- sha_to_pr shells out to git,
+            # so the old code's separate pass for the dominant sha was a wasted call.
+            pr_number=sha_to_pr(repo_root, full_sha),
+            dominant=full_sha == dominant_full,
+        ))
 
     authors: list[str] = []
-    for sha in ordered_shas:
-        author = meta.get(sha, {}).get("author")
-        if author and author not in authors:
-            authors.append(author)
+    for c in commits:
+        if c.author and c.author not in authors:
+            authors.append(c.author)
 
     pr_numbers: list[int] = []
-    for sha in ordered_shas:
-        pr = sha_to_pr(repo_root, sha)
-        if pr is not None and pr not in pr_numbers:
-            pr_numbers.append(pr)
-
-    dominant_short = dominant_full[:7]
-    commit_ts = meta.get(dominant_full, {}).get("author_time")
-    commit_date = (
-        datetime.fromtimestamp(commit_ts, tz=timezone.utc).strftime("%Y-%m-%d")
-        if commit_ts else None
-    )
+    for c in commits:
+        if c.pr_number is not None and c.pr_number not in pr_numbers:
+            pr_numbers.append(c.pr_number)
 
     return BlameInfo(
         authors=authors,
-        dominant_sha=dominant_short,
-        all_shas=[s[:7] for s in ordered_shas],
-        pr_number=sha_to_pr(repo_root, dominant_full),
+        dominant_sha=commits[0].sha,
+        all_shas=[c.sha for c in commits],
+        pr_number=commits[0].pr_number,
         pr_numbers=pr_numbers,
-        commit_date=commit_date,
-        commit_ts=commit_ts,
+        commit_date=commits[0].date,
+        commit_ts=commits[0].ts,
         uncommitted=UNCOMMITTED_SHA in counts,
+        commits=commits,
     )

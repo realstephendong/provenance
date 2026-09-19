@@ -1,16 +1,33 @@
-import { Graph, GraphNode, NodeType } from './types';
+import { Graph, GraphEdge, GraphNode, NodeType } from './types';
 
-// A hand-rolled, but genuinely interactive, SVG renderer: pan, zoom, hover-to-highlight
-// the connected subgraph, and click-through to a details drawer. Pulling in a graph
-// library for ~15 nodes would be more code, not less -- the interactivity below is
-// wired up from panel.ts's single webview <script> block, since a webview may only
-// call `acquireVsCodeApi()` once and this markup has to share that script's scope.
+// The provenance graph, drawn as a vertical timeline rather than a layered DAG.
+//
+// This view lives in a ~340px activity-bar sidebar, and the evidence it shows is
+// inherently chronological: a ticket, then a PR, then the commit, then the threads
+// that argued about it, then the incident. A layered DAG in a narrow column spreads
+// that into scattered boxes; a single dated rail reads top-to-bottom the way the
+// story actually happened, and every card is visibly attached to it.
+//
+// Two structural choices follow from that:
+//   * Person and Ticket nodes are attributes of an event, not events of their own.
+//     They render as chips inside their parent's card instead of as free-floating
+//     rectangles hanging off the side.
+//   * The rail carries chronology. The real graph edges are drawn as arcs in the
+//     right gutter, unlabelled until you hover -- the structure is still there, it
+//     just is not competing with the timeline for attention.
+//
+// Interactivity (pan, zoom, hover-to-trace, click-through) is wired up from view.ts's
+// single webview <script> block, since a webview may only call `acquireVsCodeApi()`
+// once and this markup has to share that script's scope.
 
-const NODE_WIDTH = 210;
-const NODE_HEIGHT = 66;
-const H_GAP = 56;
-const V_GAP = 110;
-const MARGIN = 48;
+const MARGIN = 10;
+const RAIL_X = 18;
+const DOT_R = 5;
+const CARD_X = 40;
+const CARD_W = 250;
+const ARC_GUTTER = 56;      // right-hand channel the relationship arcs bow into
+const ROW_GAP = 14;
+const ANCHOR_GAP = 24;      // the selection is not a dated event; set it apart
 
 interface TypeStyle {
   cssClass: string;
@@ -28,14 +45,11 @@ const TYPE_STYLE: Record<NodeType, TypeStyle> = {
   Person: { cssClass: 'n-person', icon: '\u{1F464}', description: 'git blame author' },
 };
 
+/** Attributes of an event, not events in their own right -- these become chips. */
+const SATELLITE_TYPES: ReadonlySet<NodeType> = new Set<NodeType>(['Person', 'Ticket']);
+
 export const LEGEND_TYPES: { type: NodeType; style: TypeStyle }[] =
   (Object.keys(TYPE_STYLE) as NodeType[]).map((type) => ({ type, style: TYPE_STYLE[type] }));
-
-interface Placed {
-  node: GraphNode;
-  x: number;
-  y: number;
-}
 
 function escapeHtml(value: string): string {
   return value
@@ -50,53 +64,54 @@ function escapeAttr(value: string): string {
 }
 
 function truncate(value: string, limit: number): string {
-  return value.length <= limit ? value : `${value.slice(0, limit - 1)}…`;
+  const flat = value.replace(/\s+/g, ' ').trim();
+  return flat.length <= limit ? flat : `${flat.slice(0, limit - 1)}…`;
 }
 
-/** BFS depth from the code node, so layout follows the evidence chain outwards. */
-function assignLayers(graph: Graph): Map<string, number> {
-  const adjacency = new Map<string, string[]>();
-  for (const edge of graph.edges) {
-    if (!adjacency.has(edge.source)) { adjacency.set(edge.source, []); }
-    adjacency.get(edge.source)!.push(edge.target);
-    // Undirected for layering purposes: a Slack thread that only has an incoming
-    // DISCUSSED_IN edge should still land one layer out from its source, not be
-    // treated as unreachable.
-    if (!adjacency.has(edge.target)) { adjacency.set(edge.target, []); }
-    adjacency.get(edge.target)!.push(edge.source);
+/** The sources disagree on date format: `YYYY-MM-DD` from git blame and from the
+ *  Slack export, full ISO-8601 from the GitHub and Sentry adapters. */
+function timestampOf(node: GraphNode): number | null {
+  const data = node.data ?? {};
+  for (const key of ['date', 'merged_at', 'first_seen', 'commit_date', 'created_at']) {
+    const raw = data[key];
+    if (typeof raw !== 'string' || !raw) { continue; }
+    const parsed = Date.parse(/^\d{4}-\d{2}-\d{2}$/.test(raw) ? `${raw}T00:00:00Z` : raw);
+    if (!Number.isNaN(parsed)) { return parsed; }
   }
+  return null;
+}
 
-  const layers = new Map<string, number>();
-  const root = graph.nodes.find((n) => n.id === 'code')?.id ?? graph.nodes[0]?.id;
-  if (!root) { return layers; }
-
-  const queue: string[] = [root];
-  layers.set(root, 0);
-  while (queue.length > 0) {
-    const current = queue.shift()!;
-    const depth = layers.get(current)!;
-    for (const next of adjacency.get(current) ?? []) {
-      if (!layers.has(next)) {
-        layers.set(next, depth + 1);
-        queue.push(next);
-      }
-    }
-  }
-
-  const maxDepth = Math.max(0, ...layers.values());
-  for (const node of graph.nodes) {
-    if (!layers.has(node.id)) { layers.set(node.id, maxDepth + 1); }
-  }
-  return layers;
+function dateLabel(ts: number | null): string {
+  return ts === null ? '' : new Date(ts).toISOString().slice(0, 10);
 }
 
 function subtitleFor(node: GraphNode): string {
   const data = node.data ?? {};
   if (typeof data.title === 'string' && data.title) { return data.title; }
+  if (typeof data.summary === 'string' && data.summary) { return data.summary; }
   if (Array.isArray(data.authors) && data.authors.length > 0) { return data.authors.join(', '); }
-  if (typeof data.date === 'string' && data.date) { return data.date; }
   if (typeof data.author === 'string' && data.author) { return data.author; }
+  if (typeof data.status === 'string' && data.status) { return data.status; }
   return '';
+}
+
+function citationOf(node: GraphNode): number | null {
+  const value = (node.data ?? {}).citation;
+  return typeof value === 'number' ? value : null;
+}
+
+interface Row {
+  node: GraphNode;
+  chips: GraphNode[];
+  y: number;
+  height: number;
+  cy: number;          // rail dot centre
+  ts: number | null;
+}
+
+/** Rough advance width; SVG has no measurement pass and this only drives truncation. */
+function chipWidth(label: string): number {
+  return 14 + label.length * 5.4;
 }
 
 export function renderGraph(graph: Graph): string {
@@ -104,66 +119,160 @@ export function renderGraph(graph: Graph): string {
     return '<p class="empty">No structural evidence resolved for this selection.</p>';
   }
 
-  const layers = assignLayers(graph);
-  const byLayer = new Map<number, GraphNode[]>();
+  const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+
+  const incident = new Map<string, GraphEdge[]>();
+  for (const edge of graph.edges) {
+    if (!byId.has(edge.source) || !byId.has(edge.target)) { continue; }
+    for (const end of [edge.source, edge.target]) {
+      if (!incident.has(end)) { incident.set(end, []); }
+      incident.get(end)!.push(edge);
+    }
+  }
+
+  const neighboursOf = (id: string): string[] =>
+    (incident.get(id) ?? []).map((e) => (e.source === id ? e.target : e.source));
+
+  // --- Fold satellites into their parent's card -----------------------------
+  const chipsOf = new Map<string, GraphNode[]>();
+  const foldedIn = new Set<string>();
   for (const node of graph.nodes) {
-    const depth = layers.get(node.id) ?? 0;
-    if (!byLayer.has(depth)) { byLayer.set(depth, []); }
-    byLayer.get(depth)!.push(node);
+    if (!SATELLITE_TYPES.has(node.type)) { continue; }
+    const parent = neighboursOf(node.id)
+      .find((id) => { const o = byId.get(id); return !!o && !SATELLITE_TYPES.has(o.type); });
+    // A satellite nothing claims stays on the rail; it is still evidence.
+    if (!parent) { continue; }
+    foldedIn.add(node.id);
+    if (!chipsOf.has(parent)) { chipsOf.set(parent, []); }
+    chipsOf.get(parent)!.push(node);
   }
 
-  const depths = [...byLayer.keys()].sort((a, b) => a - b);
-  const widest = Math.max(...depths.map((d) => byLayer.get(d)!.length));
-  const canvasWidth = MARGIN * 2 + widest * NODE_WIDTH + Math.max(0, widest - 1) * H_GAP;
+  // --- Order the rail chronologically ---------------------------------------
+  const ownTs = new Map<string, number | null>(graph.nodes.map((n) => [n.id, timestampOf(n)]));
 
-  const placed = new Map<string, Placed>();
-  for (const depth of depths) {
-    const row = byLayer.get(depth)!;
-    const rowWidth = row.length * NODE_WIDTH + (row.length - 1) * H_GAP;
-    const startX = (canvasWidth - rowWidth) / 2;
-    row.forEach((node, index) => {
-      placed.set(node.id, {
-        node,
-        x: startX + index * (NODE_WIDTH + H_GAP),
-        y: MARGIN + depth * (NODE_HEIGHT + V_GAP),
-      });
-    });
+  // An undated node (a bare PR, an unclaimed ticket) borrows the earliest date among
+  // its neighbours rather than being exiled to the bottom, away from its own evidence.
+  const effectiveTs = (node: GraphNode): number | null => {
+    const own = ownTs.get(node.id) ?? null;
+    if (own !== null) { return own; }
+    let best: number | null = null;
+    for (const other of neighboursOf(node.id)) {
+      const t = ownTs.get(other) ?? null;
+      if (t !== null && (best === null || t < best)) { best = t; }
+    }
+    return best;
+  };
+
+  const onRail = graph.nodes.filter((n) => !foldedIn.has(n.id));
+  const anchor = onRail.find((n) => n.id === 'code') ?? null;
+  const events = onRail.filter((n) => n !== anchor);
+  // Array.prototype.sort is stable, so undated nodes keep their retrieval order.
+  events.sort((a, b) => (effectiveTs(a) ?? Infinity) - (effectiveTs(b) ?? Infinity));
+  const ordered = anchor ? [anchor, ...events] : events;
+
+  // --- Place the rows -------------------------------------------------------
+  const rows: Row[] = [];
+  let cursor = MARGIN;
+  ordered.forEach((node, index) => {
+    const chips = chipsOf.get(node.id) ?? [];
+    const subtitle = subtitleFor(node);
+    const height = 42 + (subtitle ? 16 : 0) + (chips.length > 0 ? 22 : 0);
+    if (index > 0) { cursor += index === 1 && anchor ? ANCHOR_GAP : ROW_GAP; }
+    rows.push({ node, chips, y: cursor, height, cy: cursor + 21, ts: effectiveTs(node) });
+    cursor += height;
+  });
+
+  const canvasWidth = CARD_X + CARD_W + ARC_GUTTER + MARGIN;
+  const canvasHeight = cursor + MARGIN;
+  const rowOf = new Map(rows.map((r, i) => [r.node.id, { row: r, index: i }]));
+
+  // --- The rail: one continuous spine, so nothing reads as free-floating ----
+  let railMarkup = '';
+  if (rows.length > 1) {
+    const last = rows[rows.length - 1];
+    if (anchor) {
+      // Dashed between the selection and the oldest event: that gap is "history
+      // below", not an elapsed interval.
+      railMarkup += `<path class="rail rail-head" d="M ${RAIL_X} ${rows[0].cy} L ${RAIL_X} ${rows[1].cy}" />`;
+      if (rows.length > 2) {
+        railMarkup += `<path class="rail" d="M ${RAIL_X} ${rows[1].cy} L ${RAIL_X} ${last.cy}" />`;
+      }
+    } else {
+      railMarkup += `<path class="rail" d="M ${RAIL_X} ${rows[0].cy} L ${RAIL_X} ${last.cy}" />`;
+    }
   }
 
-  const canvasHeight = MARGIN * 2 + depths.length * NODE_HEIGHT + Math.max(0, depths.length - 1) * V_GAP;
-
-  const edgeMarkup = graph.edges.map((edge) => {
-    const from = placed.get(edge.source);
-    const to = placed.get(edge.target);
-    if (!from || !to) { return ''; }
-    const x1 = from.x + NODE_WIDTH / 2;
-    const y1 = from.y + NODE_HEIGHT;
-    const x2 = to.x + NODE_WIDTH / 2;
-    const y2 = to.y;
-    const midY = (y1 + y2) / 2;
+  // --- Relationship arcs in the right gutter --------------------------------
+  const arcMarkup = graph.edges.map((edge) => {
+    const from = rowOf.get(edge.source);
+    const to = rowOf.get(edge.target);
+    if (!from || !to || from.index === to.index) { return ''; }
+    const x0 = CARD_X + CARD_W;
+    const span = Math.abs(from.index - to.index);
+    const bow = Math.min(ARC_GUTTER - 8, 12 + span * 8);
+    const y0 = from.row.cy;
+    const y1 = to.row.cy;
     const inferred = edge.confidence === 'llm-flagged';
     return `
       <g class="edge${inferred ? ' inferred' : ''}"
          data-source="${escapeAttr(edge.source)}" data-target="${escapeAttr(edge.target)}">
-        <path d="M ${x1} ${y1} C ${x1} ${midY}, ${x2} ${midY}, ${x2} ${y2}"
+        <path d="M ${x0} ${y0} C ${x0 + bow} ${y0}, ${x0 + bow} ${y1}, ${x0} ${y1}"
               marker-end="url(#arrow${inferred ? '-inferred' : ''})" />
-        <text class="edge-label" x="${(x1 + x2) / 2}" y="${midY - 4}">${escapeHtml(edge.type)}</text>
+        <text class="edge-label" x="${x0 + bow * 0.7}" y="${(y0 + y1) / 2}">${escapeHtml(edge.type)}</text>
       </g>`;
   }).join('');
 
-  const nodeMarkup = [...placed.values()].map(({ node, x, y }) => {
+  // --- Dots, stubs and cards ------------------------------------------------
+  const rowMarkup = rows.map((row) => {
+    const { node, chips, y, height, cy } = row;
     const style = TYPE_STYLE[node.type];
     const subtitle = subtitleFor(node);
+    const citation = citationOf(node);
+    const date = dateLabel(ownTs.get(node.id) ?? null);
     const payload = escapeAttr(JSON.stringify(node));
+
+    let chipMarkup = '';
+    if (chips.length > 0) {
+      const chipY = y + (subtitle ? 56 : 40);
+      let chipX = CARD_X + 12;
+      const limit = CARD_X + CARD_W - 12;
+      for (let i = 0; i < chips.length; i++) {
+        const chip = chips[i];
+        const label = `${TYPE_STYLE[chip.type].icon} ${truncate(chip.label, 16)}`;
+        const width = chipWidth(label);
+        if (chipX + width > limit) {
+          // Out of room: stand the remainder up as a counter rather than clipping.
+          chipMarkup += `<text class="chip-more" x="${chipX + 2}" y="${chipY + 12}">+${chips.length - i}</text>`;
+          break;
+        }
+        chipMarkup += `
+          <g class="chip-node ${TYPE_STYLE[chip.type].cssClass}"
+             data-node-id="${escapeAttr(chip.id)}" data-node-json='${escapeAttr(JSON.stringify(chip))}'
+             tabindex="0" role="button">
+            <rect x="${chipX}" y="${chipY}" width="${width}" height="17" rx="8.5" />
+            <text x="${chipX + 7}" y="${chipY + 12}">${escapeHtml(label)}</text>
+          </g>`;
+        chipX += width + 5;
+      }
+    }
+
     return `
-      <g class="node ${style.cssClass}" data-node-id="${escapeAttr(node.id)}"
-         data-node-json='${payload}' tabindex="0" role="button">
-        <rect x="${x}" y="${y}" width="${NODE_WIDTH}" height="${NODE_HEIGHT}" rx="9" />
-        <rect class="accent" x="${x}" y="${y}" width="5" height="${NODE_HEIGHT}" rx="2" />
-        <text class="node-icon" x="${x + 16}" y="${y + 26}">${style.icon}</text>
-        <text class="node-type" x="${x + 40}" y="${y + 20}">${escapeHtml(node.type)}</text>
-        <text class="node-label" x="${x + 40}" y="${y + 38}">${escapeHtml(truncate(node.label, 20))}</text>
-        ${subtitle ? `<text class="node-subtitle" x="${x + 16}" y="${y + 55}">${escapeHtml(truncate(subtitle, 28))}</text>` : ''}
+      <g class="row">
+        <line class="stub" x1="${RAIL_X + DOT_R}" y1="${cy}" x2="${CARD_X}" y2="${cy}" />
+        <circle class="dot ${style.cssClass}" cx="${RAIL_X}" cy="${cy}" r="${DOT_R}" />
+        <g class="node ${style.cssClass}${citation !== null ? ' linkable' : ''}"
+           data-node-id="${escapeAttr(node.id)}" data-node-json='${payload}'
+           ${citation !== null ? `data-citation="${citation}"` : ''} tabindex="0" role="button">
+          <rect x="${CARD_X}" y="${y}" width="${CARD_W}" height="${height}" rx="8" />
+          <rect class="accent" x="${CARD_X}" y="${y}" width="4" height="${height}" rx="2" />
+          <text class="node-icon" x="${CARD_X + 14}" y="${y + 26}">${style.icon}</text>
+          <text class="node-type" x="${CARD_X + 36}" y="${y + 18}">${escapeHtml(node.type)}</text>
+          ${date ? `<text class="node-date" x="${CARD_X + CARD_W - 12}" y="${y + 18}">${escapeHtml(date)}</text>` : ''}
+          <text class="node-label" x="${CARD_X + 36}" y="${y + 33}">${escapeHtml(truncate(node.label, citation !== null ? 20 : 24))}</text>
+          ${citation !== null ? `<text class="node-cite" x="${CARD_X + CARD_W - 12}" y="${y + 33}">[${citation}] →</text>` : ''}
+          ${subtitle ? `<text class="node-subtitle" x="${CARD_X + 14}" y="${y + 48}">${escapeHtml(truncate(subtitle, 40))}</text>` : ''}
+        </g>
+        ${chipMarkup}
       </g>`;
   }).join('');
 
@@ -171,25 +280,26 @@ export function renderGraph(graph: Graph): string {
     <div class="graph-toolbar">
       <button id="graph-zoom-in" class="graph-btn" title="Zoom in">+</button>
       <button id="graph-zoom-out" class="graph-btn" title="Zoom out">−</button>
-      <button id="graph-zoom-reset" class="graph-btn" title="Fit to view">Fit</button>
-      <span class="graph-hint">scroll to zoom · drag to pan · hover a node to trace its edges · click for details</span>
+      <button id="graph-zoom-reset" class="graph-btn" title="Fit to width">Fit</button>
+      <span class="graph-hint">oldest first · click a thread to open its evidence · ⌘/ctrl+scroll to zoom</span>
     </div>
     <div class="graph-viewport-outer" id="graph-viewport-outer">
       <svg class="graph-svg" id="graph-svg" data-canvas-width="${canvasWidth}" data-canvas-height="${canvasHeight}"
            viewBox="0 0 ${canvasWidth} ${canvasHeight}" width="${canvasWidth}" height="${canvasHeight}"
-           role="img" aria-label="Provenance graph">
+           role="img" aria-label="Provenance timeline">
         <defs>
           <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5"
-                  markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                  markerWidth="6" markerHeight="6" orient="auto-start-reverse">
             <path d="M 0 0 L 10 5 L 0 10 z" />
           </marker>
           <marker id="arrow-inferred" viewBox="0 0 10 10" refX="9" refY="5"
-                  markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                  markerWidth="6" markerHeight="6" orient="auto-start-reverse">
             <path class="inferred-head" d="M 0 0 L 10 5 L 0 10 z" />
           </marker>
         </defs>
-        <g class="edges">${edgeMarkup}</g>
-        <g class="nodes">${nodeMarkup}</g>
+        <g class="rails">${railMarkup}</g>
+        <g class="edges">${arcMarkup}</g>
+        <g class="nodes">${rowMarkup}</g>
       </svg>
     </div>
     <div class="graph-legend">

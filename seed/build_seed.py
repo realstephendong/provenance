@@ -63,10 +63,14 @@ COMMITS = [
      {"webhooks/delivery.py": repo_files.DELIVERY_V1}),
     ("priya", "2026-02-11T14:32:00+00:00", "Fix webhook retry backoff (#4821)",
      {"webhooks/delivery.py": repo_files.DELIVERY_V2}),
+    ("mira", "2026-03-09T11:15:00+00:00", "Jitter webhook retry backoff (#5012)",
+     {"webhooks/delivery.py": repo_files.DELIVERY_V3}),
+    ("priya", "2026-04-06T09:40:00+00:00", "Bound the webhook retry window (#5233)",
+     {"webhooks/delivery.py": repo_files.DELIVERY_V4}),
 ]
 
 # Which commit (by index into COMMITS) each PR's merge produced.
-PR_TO_COMMIT_INDEX = {4100: 2, 4821: 3}
+PR_TO_COMMIT_INDEX = {4100: 2, 4821: 3, 5012: 4, 5233: 5}
 
 
 def _git(*args: str, env: dict | None = None) -> str:
@@ -254,6 +258,22 @@ def write_fixtures(pr_shas: dict[int, str]) -> None:
             "files": ["webhooks/delivery.py"],
             "commit_shas": [pr_shas[4821]],
         },
+        {
+            "number": 5012,
+            "title": "Jitter webhook retry backoff",
+            "author": "mira-cheng",
+            "merged_at": "2026-03-09T11:15:00Z",
+            "files": ["webhooks/delivery.py"],
+            "commit_shas": [pr_shas[5012]],
+        },
+        {
+            "number": 5233,
+            "title": "Bound the webhook retry window",
+            "author": "priya-raman",
+            "merged_at": "2026-04-06T09:40:00Z",
+            "files": ["webhooks/delivery.py"],
+            "commit_shas": [pr_shas[5233]],
+        },
     ], indent=2) + "\n")
 
     (FIXTURE_DIR / "tickets.json").write_text(json.dumps([
@@ -264,6 +284,20 @@ def write_fixtures(pr_shas: dict[int, str]) -> None:
             "assignee": "Priya Raman",
             "pr_number": 4821,
         },
+        {
+            "key": "ENG-5012",
+            "title": "Retry burst knocks merchants over on recovery",
+            "status": "Done",
+            "assignee": "Mira Cheng",
+            "pr_number": 5012,
+        },
+        {
+            "key": "ENG-5233",
+            "title": "Delivery workers pinned during multi-merchant outage",
+            "status": "In Review",
+            "assignee": "Priya Raman",
+            "pr_number": 5233,
+        },
     ], indent=2) + "\n")
 
     (FIXTURE_DIR / "sentry_issues.json").write_text(json.dumps([
@@ -273,6 +307,20 @@ def write_fixtures(pr_shas: dict[int, str]) -> None:
             "first_seen": "2026-01-25T09:12:00Z",
             "status": "resolved",
             "pr_number": 4821,
+        },
+        {
+            "id": "WEBHOOK-201",
+            "title": "Merchant endpoint 503s in a burst immediately after recovery",
+            "first_seen": "2026-03-02T04:41:00Z",
+            "status": "resolved",
+            "pr_number": 5012,
+        },
+        {
+            "id": "WEBHOOK-233",
+            "title": "Delivery worker pool saturated, queue depth climbing",
+            "first_seen": "2026-03-30T22:05:00Z",
+            "status": "unresolved",
+            "pr_number": 5233,
         },
     ], indent=2) + "\n")
 

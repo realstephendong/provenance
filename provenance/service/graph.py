@@ -1,8 +1,10 @@
 """Entity resolution: blame + hits + conflicts -> a provenance graph.
 
-Deterministic, zero LLM calls, no network. Runs in single-digit milliseconds and is
-instrumented as its own Sentry span (`resolve_graph`) specifically so that claim is
-checkable in a trace rather than asserted (13).
+Deterministic and zero LLM calls. With the default fixture-backed adapters it also
+makes no network call and runs in single-digit milliseconds; point any adapter at a
+live API (see `integrations/_live.py`) and that second half stops holding, which is
+exactly why this is instrumented as its own Sentry span (`resolve_graph`) -- the claim
+is checkable in a trace rather than asserted (13).
 
 Every edge added from structural evidence is `confidence="exact"` -- it was proven by
 git or by an identity match, not inferred. Only the conflict/supersede edges the
@@ -62,45 +64,89 @@ def resolve(
                 source=pr_id, target=issue_id, type="RELATED_TO", confidence="exact"
             ))
 
-    if blame.dominant_sha:
+    def attach_pr(pr: int, commit_id: str) -> str:
+        pr_id = node(f"pr:{pr}", "PullRequest", f"PR #{pr}")
+        edges.append(models.GraphEdge(
+            source=commit_id, target=pr_id, type="PART_OF", confidence="exact"
+        ))
+        gh = github.lookup_by_pr(pr)
+        if gh:
+            nodes[pr_id].data.update({
+                "title": gh.get("title"),
+                "author": gh.get("author"),
+                "merged_at": gh.get("merged_at"),
+            })
+        attach_pr_context(pr_id, pr)
+        return pr_id
+
+    # One node per commit that owns a line of the range, not just the dominant one.
+    # A range edited twice has two authors, two dates and two PRs; collapsing it to a
+    # single node made the graph assert one origin it could not actually support, and
+    # hung every PR off whichever commit happened to win the line count.
+    commits = list(blame.commits)
+    if not commits and blame.dominant_sha:
+        # A BlameInfo built before `commits` existed (or by hand, as the eval suite
+        # does) must still resolve to exactly the graph it used to produce.
+        commits = [models.CommitInfo(
+            sha=blame.dominant_sha, date=blame.commit_date, ts=blame.commit_ts,
+            pr_number=blame.pr_number, dominant=True,
+        )]
+
+    dominant_commit_id: str | None = None
+    for c in commits:
         commit_id = node(
-            f"commit:{blame.dominant_sha}", "Commit", blame.dominant_sha,
-            {"authors": blame.authors, "date": blame.commit_date},
+            f"commit:{c.sha}", "Commit", c.sha,
+            {
+                "authors": [c.author] if c.author else [],
+                "date": c.date,
+                # `lines` is what makes "dominant" auditable rather than a bare flag.
+                "lines": c.lines,
+                "dominant": c.dominant,
+            },
         )
+        if c.dominant or dominant_commit_id is None:
+            dominant_commit_id = commit_id
         edges.append(models.GraphEdge(
             source=code_id, target=commit_id, type="CREATED_BY", confidence="exact"
         ))
 
-        for author in blame.authors:
-            person_id = node(f"person:{author}", "Person", author)
+        if c.author:
+            person_id = node(f"person:{c.author}", "Person", c.author)
             edges.append(models.GraphEdge(
                 source=commit_id, target=person_id, type="AUTHORED_BY", confidence="exact"
             ))
 
+        if c.pr_number is not None:
+            attach_pr(c.pr_number, commit_id)
+
+    if dominant_commit_id:
+        # Anything the flat fields carry but the per-commit detail did not account for
+        # -- a legacy BlameInfo, or an author git reported without a resolvable commit
+        # -- still belongs on the map. Hang it off the dominant commit.
+        for author in blame.authors:
+            person_id = f"person:{author}"
+            if person_id not in nodes:
+                node(person_id, "Person", author)
+                edges.append(models.GraphEdge(
+                    source=dominant_commit_id, target=person_id,
+                    type="AUTHORED_BY", confidence="exact",
+                ))
         for pr in blame.pr_numbers:
-            pr_id = node(f"pr:{pr}", "PullRequest", f"PR #{pr}")
-            edges.append(models.GraphEdge(
-                source=commit_id, target=pr_id, type="PART_OF", confidence="exact"
-            ))
-
-            gh = github.lookup_by_pr(pr)
-            if gh:
-                nodes[pr_id].data.update({
-                    "title": gh.get("title"),
-                    "author": gh.get("author"),
-                    "merged_at": gh.get("merged_at"),
-                })
-
-            attach_pr_context(pr_id, pr)
+            if f"pr:{pr}" not in nodes:
+                attach_pr(pr, dominant_commit_id)
 
     slack_ids: list[str] = []
 
-    for h in hits:
+    for citation, h in enumerate(hits, start=1):
         p = h["payload"]
         slack_id = node(
             f"slack:{p['channel_id']}/{p['thread_id']}", "SlackThread",
             f"#{p['channel_name']}",
             {
+                # `citation` is the [N] the synthesis and the evidence list use for this
+                # thread. Carrying it on the node is what lets a click on the graph open
+                # the matching evidence card instead of only a detail drawer.
+                "citation": citation,
                 "date": p.get("date_str"),
                 "permalink": p.get("permalink"),
                 "summary": p.get("summary", "")[:200],
@@ -141,6 +187,18 @@ def resolve(
                 attach_pr_context(pr_id, pr)
                 anchored = True
 
+        # A thread that names a commit sha is naming *this* code, provided blame
+        # actually resolved that commit. ingest has always extracted and indexed
+        # `commit_shas` (extract.py's SHA regex, load.py's mapping); until now
+        # nothing on the read side ever looked at them.
+        for sha in p.get("commit_shas", []):
+            commit_id = f"commit:{sha}"
+            if commit_id in nodes:
+                edges.append(models.GraphEdge(
+                    source=slack_id, target=commit_id, type="REFERENCES", confidence="exact"
+                ))
+                anchored = True
+
         for key in p.get("ticket_refs", []):
             ticket_id = f"ticket:{key}"
             if ticket_id not in nodes:
@@ -153,6 +211,25 @@ def resolve(
             if ticket_id in nodes:
                 edges.append(models.GraphEdge(
                     source=slack_id, target=ticket_id, type="REFERENCES", confidence="exact"
+                ))
+                anchored = True
+                continue
+
+            # Same `ABC-123` shape, different tracker: an incident id the error
+            # tracker knows and the ticket tracker has never heard of. Without this,
+            # an incident only ever reached the graph through a PR -- so a thread that
+            # discussed the incident directly, on code with no resolvable PR, lost it.
+            issue_id = f"sentry:{key}"
+            if issue_id not in nodes:
+                issue = sentry_issues.lookup_by_id(key)
+                if issue:
+                    node(issue_id, "SentryIssue", issue["id"], {
+                        "title": issue.get("title"), "status": issue.get("status"),
+                        "first_seen": issue.get("first_seen"),
+                    })
+            if issue_id in nodes:
+                edges.append(models.GraphEdge(
+                    source=slack_id, target=issue_id, type="REFERENCES", confidence="exact"
                 ))
                 anchored = True
 

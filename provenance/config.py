@@ -36,6 +36,34 @@ def require_api_key() -> None:
         )
 
 
+# --- Integration adapter backends ---------------------------------------------
+# Every adapter in `provenance/integrations/` defaults to the JSON fixtures under
+# seed/mock_integrations: offline, deterministic, no credentials. Filling in an
+# adapter's variables below switches *that* adapter to its live API; the others keep
+# using fixtures. Any live call that fails or returns nothing falls back to the
+# fixture, so a half-configured environment degrades rather than breaks.
+#
+# NB: SENTRY_DSN above is unrelated -- that is where we *send* our own traces.
+# SENTRY_API_TOKEN below is what we *read* issues with.
+GITHUB_API = os.environ.get("GITHUB_API", "https://api.github.com").rstrip("/")
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
+GITHUB_REPO = os.environ.get("GITHUB_REPO", "").strip()            # "owner/name"
+
+SENTRY_API = os.environ.get("SENTRY_API", "https://sentry.io/api/0").rstrip("/")
+SENTRY_API_TOKEN = os.environ.get("SENTRY_API_TOKEN", "").strip()
+SENTRY_ORG = os.environ.get("SENTRY_ORG", "").strip()
+SENTRY_PROJECT = os.environ.get("SENTRY_PROJECT", "").strip()
+
+JIRA_BASE_URL = os.environ.get("JIRA_BASE_URL", "").strip().rstrip("/")
+JIRA_EMAIL = os.environ.get("JIRA_EMAIL", "").strip()
+JIRA_TOKEN = os.environ.get("JIRA_TOKEN", "").strip()
+
+# These run on the request path inside `resolve_graph`, so the timeout is deliberately
+# short: a slow tracker should cost the answer one enrichment, not the whole request.
+INTEGRATION_TIMEOUT_SECONDS = 4.0
+INTEGRATION_CACHE_TTL_SECONDS = 300      # successful lookups
+INTEGRATION_FAILURE_COOLDOWN_SECONDS = 60  # don't re-dial an API that just failed
+
 # --- Models ------------------------------------------------------------------
 DENSE_MODEL = "text-embedding-3-small"
 DENSE_DIM = 1536

@@ -12,7 +12,11 @@ import re
 PR_URL = re.compile(r"github\.com/[\w.-]+/[\w.-]+/pull/(\d+)")
 PR_HASH = re.compile(r"(?:^|\s)#(\d{1,6})\b")
 SHA = re.compile(r"\b([0-9a-f]{7,40})\b")
-TICKET = re.compile(r"\b([A-Z]{2,6}-\d{1,5})\b")
+# 2-8 rather than 2-6 uppercase letters: error-tracker issue ids share the
+# `ABC-123` shape but run longer (`WEBHOOK-184`), and graph.py resolves a ref
+# against the ticket tracker first and the error tracker second. Still requires
+# ALLCAPS-dash-digits, so the conservatism this module is built on is intact.
+TICKET = re.compile(r"\b([A-Z]{2,8}-\d{1,5})\b")
 PATH = re.compile(r"\b([\w./-]+\.(?:py|rb|ts|tsx|js|go|java|sql))\b")
 SYMBOL = re.compile(r"`([A-Za-z_][A-Za-z0-9_]{2,})`")
 _CODE_CONTEXT = re.compile(

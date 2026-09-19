@@ -34,6 +34,16 @@ export interface Result {
   raw_text: string;
 }
 
+export interface CommitInfo {
+  sha: string;
+  author: string | null;
+  date: string | null;
+  ts: number | null;
+  lines: number;
+  pr_number: number | null;
+  dominant: boolean;
+}
+
 export interface BlameInfo {
   authors: string[];
   dominant_sha: string | null;
@@ -43,6 +53,7 @@ export interface BlameInfo {
   commit_date: string | null;
   commit_ts: number | null;
   uncommitted: boolean;
+  commits: CommitInfo[];
 }
 
 export interface GraphNode {

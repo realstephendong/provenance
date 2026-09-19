@@ -294,6 +294,159 @@ def _attempt(delivery: Delivery, attempt: int) -> bool:
     return response.status_code < 300
 '''
 
+# --- webhooks/delivery.py, revision 3 -- PR #5012, jittered backoff ----------
+DELIVERY_V3 = r'''"""Webhook delivery to merchant endpoints.
+
+Deliveries are attempted inline and retried with a jittered backoff when the
+receiving endpoint is unavailable.
+"""
+
+from __future__ import annotations
+
+import logging
+import random
+import time
+
+import requests
+
+from .types import Delivery
+
+log = logging.getLogger(__name__)
+
+MAX_ATTEMPTS = 4
+DELIVERY_TIMEOUT_SECONDS = 10
+
+# Retry spacing between delivery attempts. This has to clear an entire merchant
+# failover window: at 5s we were still retrying inside the window and merchants
+# accepted the same event twice (WEBHOOK-184, ENG-4821). 7s was measured against
+# a real failover and held. Do not lower this without re-measuring the window.
+RETRY_BACKOFF_SECONDS = 7
+
+# A fixed 7s put every queued delivery for a merchant back on the wire in the same
+# instant once it recovered, and the recovery then fell over under the burst
+# (WEBHOOK-201, ENG-5012). The jitter spreads that thundering herd. It is only ever
+# added, never subtracted, so the floor stays at RETRY_BACKOFF_SECONDS and the
+# failover-window guarantee above still holds.
+RETRY_JITTER_SECONDS = 2.5
+
+
+def _retry_delay() -> float:
+    return RETRY_BACKOFF_SECONDS + random.uniform(0.0, RETRY_JITTER_SECONDS)
+
+
+def deliver(delivery: Delivery) -> bool:
+    """Attempt delivery, retrying on transport failure.
+
+    The backoff is applied between attempts only -- never after the final attempt,
+    which previously stalled the worker for a full RETRY_BACKOFF_SECONDS before
+    giving up on a merchant that was never coming back.
+    """
+    for attempt in range(MAX_ATTEMPTS):
+        if _attempt(delivery, attempt):
+            return True
+        if attempt < MAX_ATTEMPTS - 1:
+            time.sleep(_retry_delay())
+    return False
+
+
+def _attempt(delivery: Delivery, attempt: int) -> bool:
+    try:
+        response = requests.post(
+            delivery.endpoint,
+            json=delivery.payload,
+            timeout=DELIVERY_TIMEOUT_SECONDS,
+            headers={"Idempotency-Key": delivery.idempotency_key},
+        )
+    except requests.RequestException as exc:
+        log.warning("delivery attempt %s failed for %s: %s", attempt, delivery.merchant_id, exc)
+        return False
+    return response.status_code < 300
+'''
+
+# --- webhooks/delivery.py, revision 4 -- PR #5233, bounded retry window ------
+DELIVERY_V4 = r'''"""Webhook delivery to merchant endpoints.
+
+Deliveries are attempted inline and retried with a jittered backoff, bounded by a
+total retry budget, when the receiving endpoint is unavailable.
+"""
+
+from __future__ import annotations
+
+import logging
+import random
+import time
+
+import requests
+
+from .types import Delivery
+
+log = logging.getLogger(__name__)
+
+MAX_ATTEMPTS = 4
+DELIVERY_TIMEOUT_SECONDS = 10
+
+# Retry spacing between delivery attempts. This has to clear an entire merchant
+# failover window: at 5s we were still retrying inside the window and merchants
+# accepted the same event twice (WEBHOOK-184, ENG-4821). 7s was measured against
+# a real failover and held. Do not lower this without re-measuring the window.
+RETRY_BACKOFF_SECONDS = 7
+
+# A fixed 7s put every queued delivery for a merchant back on the wire in the same
+# instant once it recovered, and the recovery then fell over under the burst
+# (WEBHOOK-201, ENG-5012). The jitter spreads that thundering herd. It is only ever
+# added, never subtracted, so the floor stays at RETRY_BACKOFF_SECONDS and the
+# failover-window guarantee above still holds.
+RETRY_JITTER_SECONDS = 2.5
+
+# Ceiling on the whole retry sequence, not on one attempt. Four attempts at 7s plus
+# up to 2.5s jitter plus a 10s timeout each could pin a worker for ~40s on a single
+# dead merchant, and during a multi-merchant outage the pool never drained
+# (ENG-5233). Budget exhausted means give up and let the queue retry later.
+MAX_RETRY_WINDOW_SECONDS = 45
+
+
+def _retry_delay() -> float:
+    return RETRY_BACKOFF_SECONDS + random.uniform(0.0, RETRY_JITTER_SECONDS)
+
+
+def deliver(delivery: Delivery) -> bool:
+    """Attempt delivery, retrying on transport failure within the retry budget.
+
+    The backoff is applied between attempts only -- never after the final attempt,
+    which previously stalled the worker for a full RETRY_BACKOFF_SECONDS before
+    giving up on a merchant that was never coming back.
+    """
+    started = time.monotonic()
+    for attempt in range(MAX_ATTEMPTS):
+        if _attempt(delivery, attempt):
+            return True
+        if attempt == MAX_ATTEMPTS - 1:
+            break
+        delay = _retry_delay()
+        if time.monotonic() - started + delay > MAX_RETRY_WINDOW_SECONDS:
+            log.warning(
+                "delivery for %s abandoned: retry budget of %ss exhausted",
+                delivery.merchant_id, MAX_RETRY_WINDOW_SECONDS,
+            )
+            break
+        time.sleep(delay)
+    return False
+
+
+def _attempt(delivery: Delivery, attempt: int) -> bool:
+    try:
+        response = requests.post(
+            delivery.endpoint,
+            json=delivery.payload,
+            timeout=DELIVERY_TIMEOUT_SECONDS,
+            headers={"Idempotency-Key": delivery.idempotency_key},
+        )
+    except requests.RequestException as exc:
+        log.warning("delivery attempt %s failed for %s: %s", attempt, delivery.merchant_id, exc)
+        return False
+    return response.status_code < 300
+'''
+
 # Commit 0 -- everything that predates the demo story.
 BASE_FILES: dict[str, str] = {
     "README.md": README,

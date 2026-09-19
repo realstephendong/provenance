@@ -424,6 +424,16 @@ function resultFragment(entry: Entry, cached: boolean): string {
     parts.push(`<section class="conflicts"><h2>Disagreements</h2><ul>${items}</ul></section>`);
   }
 
+  // Open by default and above the evidence list: the timeline is the map, and the
+  // evidence cards below are what its Slack nodes link into.
+  parts.push(`
+    <section class="graph-section">
+      <details id="graph-details" open>
+        <summary><h2>Provenance timeline</h2></summary>
+        ${renderGraph(response.graph)}
+      </details>
+    </section>`);
+
   if (response.results.length > 0) {
     parts.push(`
       <section>
@@ -431,15 +441,6 @@ function resultFragment(entry: Entry, cached: boolean): string {
         ${response.results.map((r, i) => resultCard(r, i + 1)).join('')}
       </section>`);
   }
-
-  // Collapsed by default: in a sidebar the graph is a deep-dive, not the headline.
-  parts.push(`
-    <section class="graph-section">
-      <details id="graph-details">
-        <summary><h2>Provenance graph</h2></summary>
-        ${renderGraph(response.graph)}
-      </details>
-    </section>`);
 
   const timings = Object.entries(response.timing_ms)
     .map(([k, v]) => `${escapeHtml(k)} ${v}ms`).join(' · ');
@@ -635,9 +636,9 @@ const STYLES = `
   @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
   .stage { margin: 0; font-size: 0.92rem; }
 
-  /* -- Provenance graph: toolbar, pannable/zoomable viewport, legend, details -- */
+  /* -- Provenance timeline: toolbar, pannable/zoomable viewport, legend, details -- */
   .graph-section { margin-bottom: 4px; }
-  .graph-section summary { cursor: pointer; margin: 18px 0 4px; user-select: none; }
+  .graph-section summary { cursor: pointer; margin: 18px 0 6px; user-select: none; }
   .graph-toolbar { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; flex-wrap: wrap; }
   .graph-btn { background: var(--vscode-editorWidget-background);
                color: var(--vscode-foreground); border: 1px solid var(--vscode-panel-border);
@@ -648,47 +649,77 @@ const STYLES = `
   .graph-hint { opacity: 0.55; font-size: 0.7rem; }
 
   .graph-viewport-outer {
-    position: relative; overflow: hidden; height: 46vh; min-height: 260px;
+    position: relative; overflow: hidden; height: 52vh; min-height: 300px;
     border: 1px solid var(--vscode-panel-border); border-radius: 8px;
-    background:
-      radial-gradient(var(--vscode-panel-border) 1px, transparent 1px) 0 0 / 22px 22px,
-      var(--vscode-editor-background);
+    background: var(--vscode-editor-background);
     cursor: grab;
   }
   .graph-viewport-outer.grabbing { cursor: grabbing; }
+  /* The rail usually runs past the fold; fade the bottom edge so that reads as
+     "there is more below" rather than as the end of the timeline. */
+  .graph-viewport-outer::after {
+    content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 26px;
+    background: linear-gradient(transparent, var(--vscode-editor-background));
+    pointer-events: none; border-radius: 0 0 8px 8px;
+  }
   .graph-svg { transform-origin: 0 0; will-change: transform; user-select: none; }
+
+  /* The rail is the timeline itself: one unbroken spine every card hangs off. */
+  .graph-svg .rail { stroke: var(--vscode-foreground); stroke-opacity: 0.3; stroke-width: 2; fill: none; }
+  .graph-svg .rail-head { stroke-dasharray: 3 4; stroke-opacity: 0.22; }
+  .graph-svg .stub { stroke: var(--vscode-foreground); stroke-opacity: 0.3; stroke-width: 1.4; }
+  .graph-svg .dot { stroke: var(--vscode-editor-background); stroke-width: 2; }
 
   .graph-svg .node rect { fill: var(--vscode-editorWidget-background);
                           stroke: var(--vscode-panel-border); stroke-width: 1.2; }
-  .graph-svg .node .accent { opacity: 0.9; }
+  .graph-svg .node .accent { opacity: 0.95; stroke: none; }
   .graph-svg .node { cursor: pointer; transition: opacity 120ms ease; }
   .graph-svg .node:hover rect:not(.accent), .graph-svg .node:focus rect:not(.accent),
   .graph-svg .node.active rect:not(.accent) { stroke: var(--vscode-focusBorder); stroke-width: 2; }
-  .graph-svg .node.dimmed { opacity: 0.28; }
+  .graph-svg .node.dimmed, .graph-svg .chip-node.dimmed { opacity: 0.25; }
   .graph-svg .node.selected rect:not(.accent) { stroke: var(--vscode-textLink-foreground); stroke-width: 2.5; }
+  .graph-svg .node.linkable:hover .node-label { text-decoration: underline; }
 
-  .graph-svg .n-code .accent { fill: var(--vscode-charts-blue, #4a9eff); }
-  .graph-svg .n-commit .accent { fill: var(--vscode-charts-yellow, #cca700); }
-  .graph-svg .n-pr .accent { fill: var(--vscode-charts-green, #89d185); }
-  .graph-svg .n-slack .accent { fill: var(--vscode-charts-purple, #b180d7); }
-  .graph-svg .n-ticket .accent { fill: var(--vscode-charts-orange, #d18616); }
-  .graph-svg .n-sentry .accent { fill: var(--vscode-charts-red, #f14c4c); }
-  .graph-svg .n-person .accent { fill: var(--vscode-descriptionForeground); }
+  .graph-svg .n-code .accent, .graph-svg circle.n-code { fill: var(--vscode-charts-blue, #4a9eff); }
+  .graph-svg .n-commit .accent, .graph-svg circle.n-commit { fill: var(--vscode-charts-yellow, #cca700); }
+  .graph-svg .n-pr .accent, .graph-svg circle.n-pr { fill: var(--vscode-charts-green, #89d185); }
+  .graph-svg .n-slack .accent, .graph-svg circle.n-slack { fill: var(--vscode-charts-purple, #b180d7); }
+  .graph-svg .n-ticket .accent, .graph-svg circle.n-ticket { fill: var(--vscode-charts-orange, #d18616); }
+  .graph-svg .n-sentry .accent, .graph-svg circle.n-sentry { fill: var(--vscode-charts-red, #f14c4c); }
+  .graph-svg .n-person .accent, .graph-svg circle.n-person { fill: var(--vscode-descriptionForeground); }
 
-  .graph-svg .node-icon { font-size: 15px; }
-  .graph-svg .node-type { font-size: 9px; fill: var(--vscode-foreground); opacity: 0.6;
-                          text-transform: uppercase; letter-spacing: 0.05em; }
-  .graph-svg .node-label { font-size: 12.5px; fill: var(--vscode-foreground); font-weight: 600; }
-  .graph-svg .node-subtitle { font-size: 10px; fill: var(--vscode-foreground); opacity: 0.55; }
+  .graph-svg .node-icon { font-size: 13px; }
+  .graph-svg .node-type { font-size: 8.5px; fill: var(--vscode-foreground); opacity: 0.55;
+                          text-transform: uppercase; letter-spacing: 0.06em; }
+  .graph-svg .node-date { font-size: 8.5px; fill: var(--vscode-foreground); opacity: 0.5;
+                          text-anchor: end; font-family: var(--vscode-editor-font-family); }
+  .graph-svg .node-label { font-size: 12px; fill: var(--vscode-foreground); font-weight: 600; }
+  .graph-svg .node-cite { font-size: 9.5px; font-weight: 700; text-anchor: end;
+                          fill: var(--vscode-textLink-foreground); }
+  .graph-svg .node-subtitle { font-size: 9.5px; fill: var(--vscode-foreground); opacity: 0.6; }
 
-  .graph-svg .edge path { fill: none; stroke: var(--vscode-panel-border); stroke-width: 1.4;
-                          transition: opacity 120ms ease, stroke-width 120ms ease; }
-  .graph-svg .edge.inferred path { stroke-dasharray: 4 3; stroke: var(--vscode-charts-orange, #d18616); }
-  .graph-svg .edge.dimmed path { opacity: 0.15; }
-  .graph-svg .edge.active path { stroke: var(--vscode-textLink-foreground); stroke-width: 2.2; opacity: 1; }
+  /* People and tickets ride inside their event's card, not as loose boxes. */
+  .graph-svg .chip-node { cursor: pointer; transition: opacity 120ms ease; }
+  .graph-svg .chip-node rect { fill: none; stroke: var(--vscode-panel-border); stroke-width: 1; }
+  .graph-svg .chip-node text { font-size: 9px; fill: var(--vscode-foreground); opacity: 0.8; }
+  .graph-svg .chip-node:hover rect, .graph-svg .chip-node:focus rect { stroke: var(--vscode-focusBorder); }
+  .graph-svg .chip-more { font-size: 9px; fill: var(--vscode-foreground); opacity: 0.5; }
+
+  .graph-svg .edge path { fill: none; stroke: var(--vscode-panel-border); stroke-width: 1.2;
+                          opacity: 0.5; transition: opacity 120ms ease, stroke-width 120ms ease; }
+  /* Held back at rest: the rail is the story, the arcs answer "why is this here?"
+     once you hover. Left loud, the code->thread fallback edges span the whole
+     timeline and drown it. */
+  .graph-svg .edge.inferred path { stroke-dasharray: 4 3; opacity: 0.4;
+                                   stroke: var(--vscode-charts-orange, #d18616); }
+  .graph-svg .edge.dimmed path { opacity: 0.1; }
+  .graph-svg .edge.active path { stroke: var(--vscode-textLink-foreground); stroke-width: 2; opacity: 1; }
   .graph-svg marker path { fill: var(--vscode-panel-border); stroke: none; }
   .graph-svg marker .inferred-head { fill: var(--vscode-charts-orange, #d18616); }
-  .graph-svg .edge-label { font-size: 8px; fill: var(--vscode-foreground); opacity: 0.45; text-anchor: middle; }
+  /* Edge types would be noise on every arc at once; they surface on hover instead. */
+  .graph-svg .edge-label { font-size: 8px; fill: var(--vscode-foreground); text-anchor: middle;
+                           opacity: 0; transition: opacity 120ms ease; pointer-events: none; }
+  .graph-svg .edge.active .edge-label { opacity: 0.85; }
 
   .graph-legend { display: flex; flex-wrap: wrap; gap: 5px 9px; margin-top: 8px; }
   .legend-chip { font-size: 0.68rem; opacity: 0.8; display: inline-flex; align-items: center; gap: 4px;
@@ -735,6 +766,22 @@ const CLIENT_SCRIPT = `
     }
   });
 
+  // Open and highlight evidence card [index]. Shared by the [N] citations in the
+  // synthesis and by a click on a Slack node in the timeline -- both are the same
+  // gesture ("show me the thread this refers to") and must behave identically.
+  function focusEvidence(index) {
+    const card = document.getElementById('result-' + index);
+    if (!card) { return false; }
+    // The cards ship collapsed; a link that scrolled to a closed one would look
+    // like it had gone nowhere.
+    if (card.tagName === 'DETAILS') { card.open = true; }
+    card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    card.classList.remove('flash');
+    void card.offsetWidth;
+    card.classList.add('flash');
+    return true;
+  }
+
   // One delegated handler: the content below #app is replaced on every render, so
   // per-element listeners would have to be rebound (and would leak) each time.
   document.addEventListener('click', function (event) {
@@ -744,16 +791,8 @@ const CLIENT_SCRIPT = `
     const citation = target.closest('.citation');
     if (citation) {
       event.preventDefault();
-      const card = document.getElementById(citation.getAttribute('data-target') || '');
-      if (card) {
-        // The cards ship collapsed; a citation that scrolled to a closed one
-        // would look like it had gone nowhere.
-        if (card.tagName === 'DETAILS') { card.open = true; }
-        card.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        card.classList.remove('flash');
-        void card.offsetWidth;
-        card.classList.add('flash');
-      }
+      const id = citation.getAttribute('data-target') || '';
+      focusEvidence(id.replace('result-', ''));
       return;
     }
 
@@ -800,18 +839,16 @@ const CLIENT_SCRIPT = `
       svg.style.transform = 'translate(' + tx + 'px, ' + ty + 'px) scale(' + scale + ')';
     }
 
+    // Fit the *width* only. Scaling a tall timeline to fit the viewport height would
+    // shrink it to an unreadable sliver; the rail is meant to be panned down instead.
     function fit() {
       const rect = outer.getBoundingClientRect();
-      if (rect.width === 0 || rect.height === 0) { return; }
-      const pad = 24;
-      const fitScale = Math.min(
-        (rect.width - pad) / canvasWidth,
-        (rect.height - pad) / canvasHeight,
-        1
-      );
+      if (rect.width === 0) { return; }
+      const pad = 16;
+      const fitScale = Math.min((rect.width - pad) / canvasWidth, 1);
       scale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, fitScale || 1));
-      tx = (rect.width - canvasWidth * scale) / 2;
-      ty = (rect.height - canvasHeight * scale) / 2;
+      tx = Math.max(0, (rect.width - canvasWidth * scale) / 2);
+      ty = 8;
       apply();
     }
 
@@ -834,9 +871,24 @@ const CLIENT_SCRIPT = `
     if (zoomOut) { zoomOut.addEventListener('click', function () { zoomBy(0.8); }); }
     if (zoomReset) { zoomReset.addEventListener('click', fit); }
 
+    // Keep the pan inside the canvas, so the rail can't be flung out of sight.
+    function clampPan() {
+      const rect = outer.getBoundingClientRect();
+      const height = canvasHeight * scale;
+      ty = Math.max(Math.min(8, rect.height - height - 8), Math.min(8, ty));
+    }
+
+    // A tall timeline wants the wheel to scroll it, the way every other long list in
+    // the editor behaves. Zoom moves to ctrl/cmd+wheel.
     function onWheel(event) {
       event.preventDefault();
-      zoomBy(event.deltaY < 0 ? 1.08 : 0.93, event.clientX, event.clientY);
+      if (event.ctrlKey || event.metaKey) {
+        zoomBy(event.deltaY < 0 ? 1.08 : 0.93, event.clientX, event.clientY);
+        return;
+      }
+      ty -= event.deltaY;
+      clampPan();
+      apply();
     }
     outer.addEventListener('wheel', onWheel, { passive: false });
 
@@ -855,6 +907,7 @@ const CLIENT_SCRIPT = `
       ty += event.clientY - lastY;
       lastX = event.clientX;
       lastY = event.clientY;
+      clampPan();
       apply();
     }
     function onUp() {
@@ -870,11 +923,20 @@ const CLIENT_SCRIPT = `
     // between them; dim everything else so the evidence chain reads at a glance.
     const nodeEls = Array.prototype.slice.call(svg.querySelectorAll('.node'));
     const edgeEls = Array.prototype.slice.call(svg.querySelectorAll('.edge'));
+    const chipEls = Array.prototype.slice.call(svg.querySelectorAll('.chip-node'));
+
+    // A chip is drawn inside its event's row, so it dims and lights with that event.
+    function ownerOf(chip) {
+      const row = chip.closest('.row');
+      const owner = row ? row.querySelector('.node') : null;
+      return owner ? owner.getAttribute('data-node-id') : null;
+    }
 
     function setTrace(activeId) {
       if (!activeId) {
         nodeEls.forEach(function (n) { n.classList.remove('active', 'dimmed'); });
         edgeEls.forEach(function (e) { e.classList.remove('active', 'dimmed'); });
+        chipEls.forEach(function (c) { c.classList.remove('dimmed'); });
         return;
       }
       const connected = new Set([activeId]);
@@ -894,6 +956,10 @@ const CLIENT_SCRIPT = `
         const isConnected = id !== null && connected.has(id);
         n.classList.toggle('active', isConnected);
         n.classList.toggle('dimmed', !isConnected);
+      });
+      chipEls.forEach(function (c) {
+        const owner = ownerOf(c);
+        c.classList.toggle('dimmed', !(owner !== null && connected.has(owner)));
       });
     }
 
@@ -931,17 +997,50 @@ const CLIENT_SCRIPT = `
       }
     }
 
-    nodeEls.forEach(function (n) {
-      n.addEventListener('mouseenter', function () { setTrace(n.getAttribute('data-node-id')); });
-      n.addEventListener('mouseleave', function () { setTrace(null); });
-      n.addEventListener('focus', function () { setTrace(n.getAttribute('data-node-id')); });
-      n.addEventListener('blur', function () { setTrace(null); });
-      n.addEventListener('click', function () {
-        try {
-          renderDetails(JSON.parse(n.getAttribute('data-node-json') || '{}'));
-        } catch (err) { /* malformed payload -- leave the details panel untouched */ }
+    function parseNode(el) {
+      try {
+        return JSON.parse(el.getAttribute('data-node-json') || '{}');
+      } catch (err) {
+        return null;   // malformed payload -- leave the details panel untouched
+      }
+    }
+
+    // Activating a node always fills the detail drawer; a node that carries a
+    // citation *also* jumps to the evidence card it stands for, which is what makes
+    // the timeline a navigable index of the list below rather than a separate view.
+    function activate(el) {
+      const node = parseNode(el);
+      if (!node) { return; }
+      renderDetails(node);
+      const citation = el.getAttribute('data-citation');
+      if (citation) { focusEvidence(citation); }
+    }
+
+    function wire(el) {
+      // Satellite edges (AUTHORED_BY, TRACKED_BY) are folded into the card and so draw
+      // no arc of their own -- tracing a chip by its own id would dim the whole graph.
+      // Trace the event that owns it instead.
+      const traceId = el.classList.contains('chip-node')
+        ? ownerOf(el)
+        : el.getAttribute('data-node-id');
+      el.addEventListener('mouseenter', function () { setTrace(traceId); });
+      el.addEventListener('mouseleave', function () { setTrace(null); });
+      el.addEventListener('focus', function () { setTrace(traceId); });
+      el.addEventListener('blur', function () { setTrace(null); });
+      el.addEventListener('click', function (event) {
+        event.stopPropagation();
+        activate(el);
       });
-    });
+      el.addEventListener('keydown', function (event) {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          activate(el);
+        }
+      });
+    }
+
+    nodeEls.forEach(wire);
+    chipEls.forEach(wire);
 
     destroyGraph = function () {
       outer.removeEventListener('wheel', onWheel);
@@ -951,7 +1050,7 @@ const CLIENT_SCRIPT = `
       window.removeEventListener('resize', fit);
     };
 
-    // The graph ships collapsed, so it has no measurable box until it is opened.
+    // Re-fit whenever it is reopened: a collapsed <details> has no measurable box.
     const wrapper = document.getElementById('graph-details');
     if (wrapper) {
       wrapper.addEventListener('toggle', function () {
