@@ -67,6 +67,7 @@ export class ProvenanceViewProvider implements vscode.WebviewViewProvider {
   private history: Entry[] = [];
   private activeKey: string | undefined;
   private lastFailure: Selection | undefined;
+  private timelinePanel: vscode.WebviewPanel | undefined;
 
   constructor(private readonly serviceUrl: () => string) {}
 
@@ -145,6 +146,9 @@ export class ProvenanceViewProvider implements vscode.WebviewViewProvider {
         return;
       case 'reveal':
         await this.revealActiveRange();
+        return;
+      case 'openTimeline':
+        this.openTimeline();
         return;
       case 'clearHistory':
         this.history = [];
@@ -243,6 +247,52 @@ export class ProvenanceViewProvider implements vscode.WebviewViewProvider {
   /** The history strip is part of every paint, so it survives loading and errors. */
   private chrome(body: string): string {
     return historyStrip(this.history, this.activeKey) + body;
+  }
+
+  /** The sidebar is ~340px; the graph outgrows it fast. Same renderer, more room. */
+  openTimeline(): void {
+    const entry = this.activeEntry();
+    if (!entry) {
+      void vscode.window.showInformationMessage('Provenance: explain a selection first.');
+      return;
+    }
+
+    const fresh = !this.timelinePanel;
+    if (!this.timelinePanel) {
+      this.timelinePanel = vscode.window.createWebviewPanel(
+        'provenanceTimeline',
+        'Provenance timeline',
+        vscode.ViewColumn.Active,
+        { enableScripts: true, retainContextWhenHidden: true },
+      );
+      this.timelinePanel.onDidDispose(() => { this.timelinePanel = undefined; });
+      // Same shell and same client script as the sidebar, so pan, zoom,
+      // hover-to-trace and click-for-details all behave identically. The panel
+      // only has to answer 'ready' with a fragment and open external links.
+      this.timelinePanel.webview.onDidReceiveMessage((m: { type: string; url?: string }) => {
+        if (m.type === 'ready') {
+          const active = this.activeEntry();
+          if (active) {
+            void this.timelinePanel?.webview.postMessage({
+              type: 'render', html: timelineFragment(active),
+            });
+          }
+          return;
+        }
+        if (m.type === 'openLink' && m.url) {
+          void vscode.env.openExternal(vscode.Uri.parse(m.url));
+        }
+      });
+    }
+
+    const { selection } = entry;
+    this.timelinePanel.title = `Timeline: ${selection.file_path}:${selection.line_start}-${selection.line_end}`;
+    if (fresh) {
+      this.timelinePanel.webview.html = this.shell(this.timelinePanel.webview);
+    } else {
+      void this.timelinePanel.webview.postMessage({ type: 'render', html: timelineFragment(entry) });
+    }
+    this.timelinePanel.reveal(vscode.ViewColumn.Active, false);
   }
 
   private async revealActiveRange(): Promise<void> {
@@ -380,6 +430,19 @@ function historyStrip(history: Entry[], activeKey: string | undefined): string {
       ${chips}
       <button class="chip ghost" id="clear-history" title="Forget these">clear</button>
     </nav>`;
+}
+
+/** The expanded tab: the timeline is the content, not a section inside a report. */
+function timelineFragment(entry: Entry): string {
+  const { response, selection } = entry;
+  return `
+    <header>
+      <h1>${escapeHtml(selection.file_path)}:${selection.line_start}-${selection.line_end}</h1>
+      ${blameLine(response.blame)}
+    </header>
+    <section class="graph-section fullscreen">
+      ${renderGraph(response.graph, { fullscreen: true })}
+    </section>`;
 }
 
 function resultFragment(entry: Entry, cached: boolean): string {
@@ -705,21 +768,40 @@ const STYLES = `
   .graph-svg .chip-node:hover rect, .graph-svg .chip-node:focus rect { stroke: var(--vscode-focusBorder); }
   .graph-svg .chip-more { font-size: 9px; fill: var(--vscode-foreground); opacity: 0.5; }
 
-  .graph-svg .edge path { fill: none; stroke: var(--vscode-panel-border); stroke-width: 1.2;
-                          opacity: 0.5; transition: opacity 120ms ease, stroke-width 120ms ease; }
-  /* Held back at rest: the rail is the story, the arcs answer "why is this here?"
-     once you hover. Left loud, the code->thread fallback edges span the whole
-     timeline and drown it. */
-  .graph-svg .edge.inferred path { stroke-dasharray: 4 3; opacity: 0.4;
+  /* Arcs carry real structure, so they are legible at rest rather than hinted:
+     the old 0.5 opacity on panel-border grey read as "no edge here" and made a
+     fully connected graph look like scattered islands. Lanes (graph.ts) keep
+     them from overlapping, so they can afford to be seen. */
+  .graph-svg .edge path { fill: none; stroke: var(--vscode-descriptionForeground);
+                          stroke-width: 1.5; opacity: 0.75;
+                          transition: opacity 120ms ease, stroke-width 120ms ease; }
+  /* A fat invisible stroke so thin arcs are still easy to hover. */
+  .graph-svg .edge path.hit { stroke: transparent; stroke-width: 12; opacity: 1; pointer-events: stroke; }
+  .graph-svg .edge.inferred path { stroke-dasharray: 4 3; opacity: 0.6;
                                    stroke: var(--vscode-charts-orange, #d18616); }
-  .graph-svg .edge.dimmed path { opacity: 0.1; }
-  .graph-svg .edge.active path { stroke: var(--vscode-textLink-foreground); stroke-width: 2; opacity: 1; }
-  .graph-svg marker path { fill: var(--vscode-panel-border); stroke: none; }
+  .graph-svg .edge.dimmed path { opacity: 0.12; }
+  .graph-svg .edge.dimmed .edge-label-g { opacity: 0; }
+  .graph-svg .edge.active path { stroke: var(--vscode-textLink-foreground); stroke-width: 2.4; opacity: 1; }
+  .graph-svg marker path { fill: var(--vscode-descriptionForeground); stroke: none; }
   .graph-svg marker .inferred-head { fill: var(--vscode-charts-orange, #d18616); }
-  /* Edge types would be noise on every arc at once; they surface on hover instead. */
-  .graph-svg .edge-label { font-size: 8px; fill: var(--vscode-foreground); text-anchor: middle;
-                           opacity: 0; transition: opacity 120ms ease; pointer-events: none; }
-  .graph-svg .edge.active .edge-label { opacity: 0.85; }
+
+  /* Labels sit on a pill at the arc apex so they stay readable over whatever
+     they cross. Hover-only in the sidebar; always on in the expanded tab,
+     which has the room for them. */
+  .graph-svg .edge-label-g { opacity: 0; transition: opacity 120ms ease; pointer-events: none; }
+  .graph-svg.labels-on .edge-label-g { opacity: 0.9; }
+  .graph-svg .edge.active .edge-label-g { opacity: 1; }
+  .graph-svg .edge-label-bg { fill: var(--vscode-editor-background);
+                              stroke: var(--vscode-panel-border); stroke-width: 0.8; }
+  .graph-svg .edge.active .edge-label-bg { stroke: var(--vscode-textLink-foreground); }
+  .graph-svg .edge-label { font-size: 8.5px; fill: var(--vscode-foreground);
+                           text-anchor: middle; pointer-events: none; }
+  .graph-svg.labels-on .edge-label { font-size: 10px; }
+
+  /* Expanded tab: the timeline is the page, so let it take the height. */
+  .graph-section.fullscreen .graph-viewport-outer { height: calc(100vh - 190px); min-height: 420px; }
+  .graph-section.fullscreen .graph-hint { opacity: 0.75; }
+  body:has(.graph-section.fullscreen) { max-width: none; }
 
   .graph-legend { display: flex; flex-wrap: wrap; gap: 5px 9px; margin-top: 8px; }
   .legend-chip { font-size: 0.68rem; opacity: 0.8; display: inline-flex; align-items: center; gap: 4px;
@@ -816,6 +898,7 @@ const CLIENT_SCRIPT = `
     else if (button.id === 'retry') { vscodeApi.postMessage({ type: 'retry' }); }
     else if (button.id === 'reveal') { vscodeApi.postMessage({ type: 'reveal' }); }
     else if (button.id === 'clear-history') { vscodeApi.postMessage({ type: 'clearHistory' }); }
+    else if (button.id === 'graph-expand') { vscodeApi.postMessage({ type: 'openTimeline' }); }
   });
 
   // ---- Provenance graph: pan, zoom, hover-to-trace, click-for-details ----

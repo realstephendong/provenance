@@ -13,3 +13,6 @@ extension/*.vsix
 seed/repo/
 seed/slack/
 .pytest_cache/
+
+# local graph previews (generated, not part of the build)
+preview_*.html
