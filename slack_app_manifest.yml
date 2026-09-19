@@ -1,29 +1,62 @@
-# Slack app manifest for Provenance's live Slack ingest.
+# Slack app manifest for Provenance: live ingest (read-only) plus the on-demand bot.
 #
 # Create it at https://api.slack.com/apps -> Create New App -> From a manifest, in the
-# workspace you want to read, then Install to Workspace and copy the "User OAuth Token"
-# (xoxp-...) into SLACK_USER_TOKEN in .env.
+# workspace you want to read. If you already made an app from an earlier version of
+# this file, paste this one into "App Manifest" and reinstall instead.
 #
-# Keep it an INTERNAL app: never enable distribution or list it in the Marketplace. Since
-# 2025-05-29 Slack limits conversations.history / conversations.replies to 1 request per
-# minute (15 messages each) for distributed non-Marketplace apps; internal apps keep the
-# normal limits, which a full-history backfill needs.
+# After installing, three values go into .env:
+#   SLACK_USER_TOKEN  "OAuth & Permissions" -> User OAuth Token   (xoxp-...)
+#   SLACK_BOT_TOKEN   "OAuth & Permissions" -> Bot User OAuth Token (xoxb-...)
+#   SLACK_APP_TOKEN   "Basic Information" -> App-Level Tokens -> new token with
+#                     the `connections:write` scope                (xapp-...)
+# Reinstalling reissues the user token, so copy that one again even if you had it.
 #
-# Everything here is read-only and requested as a *user* scope, so the token can see
-# exactly what you can see in Slack and nothing more. Reactions arrive with the message
-# payload, so no reactions:read is needed.
+# Keep it an INTERNAL app: never enable distribution or list it in the Marketplace.
+# Since 2025-05-29 Slack limits conversations.history / conversations.replies to 1
+# request per minute (15 messages each) for distributed non-Marketplace apps; internal
+# apps keep the normal limits, which a full-history backfill needs.
+#
+# Reading Slack is still done entirely with *user* scopes, so the token sees exactly
+# what you see and nothing more. Reactions arrive with the message payload, so no
+# reactions:read is needed -- but reactions:write is, because indexing a conversation
+# flags it with a :pushpin: so a later re-ingest keeps it (see slackbot/index_thread.py).
+#
+# The bot's own scopes are only the command plumbing. It answers over each
+# interaction's response_url, and never posts into a channel.
 display_information:
-  name: Provenance (read-only)
-  description: Reads one Slack channel so Provenance can index it locally.
+  name: Provenance
+  description: Indexes a Slack conversation so it surfaces next to the code it explains.
+features:
+  bot_user:
+    display_name: Provenance
+    always_online: false
+  slash_commands:
+    - command: /provenance
+      description: Index a Slack conversation into Provenance
+      usage_hint: "[message link] — no argument picks from recent conversations"
+      should_escape: false
+  shortcuts:
+    - name: Index in Provenance
+      type: message
+      callback_id: index_thread
+      description: Make this conversation findable from the code it explains
 oauth_config:
   scopes:
+    bot:
+      - commands
+      - chat:write
     user:
       - channels:history
       - channels:read
       - groups:history
       - groups:read
       - users:read
+      - reactions:write
 settings:
   org_deploy_enabled: false
-  socket_mode_enabled: false
+  # Socket Mode: the bot dials out to Slack, so it runs on a laptop with no public
+  # URL and no tunnel. This is why SLACK_APP_TOKEN exists.
+  socket_mode_enabled: true
   token_rotation_enabled: false
+  interactivity:
+    is_enabled: true

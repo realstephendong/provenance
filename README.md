@@ -57,7 +57,9 @@ For the extension: `make extension`, then open `extension/` in VS Code and press
   need no credentials at all. See [Mock or real](#mock-or-real).
 - **`SENTRY_DSN` is optional.** Unset, `observability.py` no-ops every call.
 - **`SLACK_USER_TOKEN` is only needed for live Slack** — see [Connecting to Slack](#connecting-to-slack).
-  The seed demo needs no Slack account.
+  The seed demo needs no Slack account. **`SLACK_BOT_TOKEN` / `SLACK_APP_TOKEN` are
+  only needed for [the Slack bot](#the-slack-bot)**, which indexes a conversation on
+  demand from inside Slack.
 
 ---
 
@@ -214,8 +216,10 @@ Token** (`xoxp-…`). It is the only value you fill in.
 
 1. In workspace `T0C34UQUW68`, go to <https://api.slack.com/apps> → **Create New App** →
    **From a manifest**, and paste [`slack_app_manifest.yml`](slack_app_manifest.yml).
-   It asks only for read-only *user* scopes. **Keep it an internal app — never
-   distribute it.** Since 2025-05-29 Slack limits `conversations.history` and
+   Everything that *reads* Slack is a read-only **user** scope, so the token sees
+   exactly what you see. (The manifest also declares the bot user and the two command
+   scopes [the Slack bot](#the-slack-bot) needs; leave its tokens blank and the bot is
+   simply off.) **Keep it an internal app — never distribute it.** Since 2025-05-29 Slack limits `conversations.history` and
    `conversations.replies` to 1 request/minute (15 messages each) for distributed
    non-Marketplace apps, which makes a full-history backfill impractical. Internal apps
    keep the normal limits.
@@ -258,6 +262,81 @@ a deletion, or a channel newly added to `SLACK_CHANNEL_IDS` is picked up by `rec
 - Message text is sent to OpenAI (summaries and embeddings) and stored in your local
   Elasticsearch, which runs with security disabled (`docker-compose.yml`). That is fine
   for your own machine; do not point it at a shared server.
+
+---
+
+## The Slack bot
+
+`make ingest-slack` reads whole channels in a batch. The bot indexes **one conversation
+on demand, from inside Slack** — so a discussion that finished two minutes ago can
+already be matched against code you are about to write. That is the live loop: talk it
+through in Slack, index the thread, write the code, select it, see the thread come back.
+
+It runs over **Socket Mode**, so it needs no public URL and no tunnel — the process
+dials out to Slack from your machine and writes straight to your local Elasticsearch.
+
+**Two ways to trigger it**
+
+| | How it knows which conversation | |
+| --- | --- | --- |
+| **Index in Provenance** (a message's `...` menu) | the payload carries `thread_ts` | one click, unambiguous — use this one |
+| `/provenance` | it can't — Slack does **not** put `thread_ts` in a slash-command payload, so it offers the channel's recent conversations as buttons | type, then click |
+| `/provenance <message link>` | parses the link | for a conversation further back |
+
+Un-threaded conversations work too. `/provenance` re-segments recent history with the
+same burst rule the batch ingest uses, so a run of messages straight in the channel is
+offered as one conversation and indexed as one unit.
+
+**Setup** (on top of [Connecting to Slack](#connecting-to-slack))
+
+1. Paste [`slack_app_manifest.yml`](slack_app_manifest.yml) into your app's **App
+   Manifest** page and **reinstall**. It adds a bot user, Socket Mode, the
+   `/provenance` command and the message shortcut.
+2. Copy three values into `.env` — reinstalling reissues the user token, so re-copy
+   that one even if you already had it:
+
+   ```bash
+   SLACK_USER_TOKEN=xoxp-...   # OAuth & Permissions -> User OAuth Token
+   SLACK_BOT_TOKEN=xoxb-...    # OAuth & Permissions -> Bot User OAuth Token
+   SLACK_APP_TOKEN=xapp-...    # Basic Information -> App-Level Tokens (connections:write)
+   ```
+
+3. `make slackbot`. It verifies the tokens before accepting a single command, and
+   prints which workspace permalinks will point at.
+
+**Getting an exact match, not a hopeful one**
+
+The reply tells you what the conversation can be matched on. Retrieval's exact tier
+keys on PR numbers, commit SHAs and file paths — and brand-new code has no PR and no
+SHA, so **name the file in the conversation**:
+
+> "let's cap the retries at 5 in `webhooks/delivery.py`"
+
+That one path turns the match from semantic-and-hopeful into structural-and-certain.
+If nothing structural is found, the bot says so and tells you what to add.
+
+**What it does to the conversation**
+
+Indexing adds a :pushpin: in Slack. That is not decoration: `segment` drops units under
+`MIN_MESSAGES_PER_UNIT` (3) unless a trigger reaction says a human flagged it, so
+without the pin the next `make ingest-slack` would re-segment the channel, not rebuild
+a short conversation, and `--mode reconcile` would delete it as stale. The pin also
+earns the thread `REACTION_BOOST` at query time.
+
+Everything else is shared with the batch path rather than reimplemented. The document
+id is a UUID5 of `channel_id/thread_id`, and `thread_id` is the first message's
+timestamp — so the bot and a later `make ingest-slack` write **the same `_id`** for the
+same conversation. They overwrite each other; neither duplicates.
+
+**Limits worth knowing**
+
+- Reads use `SLACK_USER_TOKEN`, so the bot sees exactly what you see. The bot token
+  only carries command plumbing, and replies go over each interaction's
+  `response_url` — it never posts into a channel.
+- The picker reads one page of history (`SLACK_BOT_HISTORY_MESSAGES`, 200 messages,
+  never paginated). It answers "what was just being talked about", not "search".
+- Indexing a conversation in a channel outside `SLACK_CHANNEL_IDS` works, and the reply
+  warns you that a full re-ingest won't cover it.
 
 ---
 
@@ -351,7 +430,8 @@ provenance/
   llm.py             the only module that calls OpenAI
   observability.py   Sentry, no-op when unconfigured
   integrations/      mocked GitHub / tickets / incidents, as real adapter interfaces
-  ingest/            export -> Elasticsearch, three modes
+  ingest/            Slack -> Elasticsearch, three batch modes
+  slackbot/          the on-demand bot: one conversation, indexed from Slack
   service/           the live /context pipeline
   mcp_server/        MCP stdio server
   cli/               terminal surface

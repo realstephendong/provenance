@@ -27,9 +27,7 @@ from pathlib import Path
 
 from .. import config
 from . import checkpoint as checkpoint_store
-from . import load, slack_check, slack_live, summarize
-from .embed import embed_summaries
-from .extract import extract_refs
+from . import load, pipeline, slack_check, slack_live
 from .segment import Unit, group_by_channel, segment
 from .slack_client import SlackClient, SlackError
 from .slack_source import Message, load_export
@@ -39,50 +37,17 @@ from .slack_source import Message, load_export
 Loader = Callable[[float], list[Message]]
 
 
-def _payload(unit: Unit, summary: str, llm_symbols: list[str]) -> dict:
-    refs = extract_refs(unit.raw_text)
-    symbols, seen = [], set()
-    for s in list(refs["symbols"]) + list(llm_symbols):
-        key = s.lower()
-        if key not in seen:
-            seen.add(key)
-            symbols.append(s)
-    return {
-        "thread_id": unit.thread_id,
-        "channel_id": unit.channel_id,
-        "channel_name": unit.channel_name,
-        "channel_tier": unit.channel_tier,
-        "permalink": unit.permalink,
-        "ts_start": unit.ts_start,
-        "ts_end": unit.ts_end,
-        "participants": unit.participants,
-        "message_count": len(unit.messages),
-        "summary": summary,
-        "raw_text": unit.raw_text,
-        "pr_refs": refs["pr_refs"],
-        "commit_shas": refs["commit_shas"],
-        "ticket_refs": refs["ticket_refs"],
-        "file_paths": refs["file_paths"],
-        "symbols": symbols,
-        "reactions": unit.reactions,
-        "is_bookmarked": unit.is_bookmarked,
-    }
-
-
 async def process_units(es, units: list[Unit]) -> int:
-    """The shared tail of every mode: summarize, embed, and write `units`."""
+    """The shared tail of every mode: summarize, embed, and write `units`.
+
+    The work itself is `pipeline.build_and_upsert`, which the Slack bot's on-demand
+    path also calls; this is the batch path's progress reporting around it.
+    """
     if not units:
         print("  nothing to process")
         return 0
 
-    print(f"  summarizing {len(units)} units ({config.SUMMARY_MODEL})...")
-    summarized = await summarize.summarize_units(units)
-    payloads = [_payload(u, s, syms) for u, (s, syms) in zip(units, summarized)]
-
-    print(f"  embedding {len(payloads)} summaries ({config.DENSE_MODEL})...")
-    dense = await embed_summaries([p["summary"] for p in payloads])
-
-    written = load.upsert(es, payloads, dense)
+    _, written = await pipeline.build_and_upsert(es, units, say=print)
     print(f"  indexed {written} documents")
     return written
 
