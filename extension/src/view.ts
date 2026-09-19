@@ -768,20 +768,28 @@ const STYLES = `
   .graph-svg .chip-node:hover rect, .graph-svg .chip-node:focus rect { stroke: var(--vscode-focusBorder); }
   .graph-svg .chip-more { font-size: 9px; fill: var(--vscode-foreground); opacity: 0.5; }
 
-  /* Arcs carry real structure, so they are legible at rest rather than hinted:
+  /* Edges carry real structure, so they are legible at rest rather than hinted:
      the old 0.5 opacity on panel-border grey read as "no edge here" and made a
      fully connected graph look like scattered islands. Lanes (graph.ts) keep
-     them from overlapping, so they can afford to be seen. */
-  .graph-svg .edge path { fill: none; stroke: var(--vscode-descriptionForeground);
-                          stroke-width: 1.5; opacity: 0.75;
-                          transition: opacity 120ms ease, stroke-width 120ms ease; }
-  /* A fat invisible stroke so thin arcs are still easy to hover. */
-  .graph-svg .edge path.hit { stroke: transparent; stroke-width: 12; opacity: 1; pointer-events: stroke; }
-  .graph-svg .edge.inferred path { stroke-dasharray: 4 3; opacity: 0.6;
-                                   stroke: var(--vscode-charts-orange, #d18616); }
-  .graph-svg .edge.dimmed path { opacity: 0.12; }
+     them from overlapping, so they can afford to be seen.
+
+     Every state rule below targets .line, never a bare element selector. Each edge also
+     carries a fat transparent .hit sibling, and '.edge.inferred path' ties
+     '.edge path.hit' on specificity (0,3,1) -- so a bare-element rule wins on
+     source order and paints the 12px hover target solid orange. That is what
+     turned every flagged edge into a railroad tie. */
+  .graph-svg .edge .line { fill: none; stroke: var(--vscode-descriptionForeground);
+                           stroke-width: 1.5; opacity: 0.75;
+                           stroke-linejoin: round; stroke-linecap: butt;
+                           transition: opacity 120ms ease, stroke-width 120ms ease; }
+  /* A fat invisible stroke so thin edges are still easy to hover. */
+  .graph-svg .edge .hit { fill: none; stroke: transparent; stroke-width: 12;
+                          pointer-events: stroke; }
+  .graph-svg .edge.inferred .line { stroke-dasharray: 5 4; opacity: 0.7;
+                                    stroke: var(--vscode-charts-orange, #d18616); }
+  .graph-svg .edge.dimmed .line { opacity: 0.12; }
   .graph-svg .edge.dimmed .edge-label-g { opacity: 0; }
-  .graph-svg .edge.active path { stroke: var(--vscode-textLink-foreground); stroke-width: 2.4; opacity: 1; }
+  .graph-svg .edge.active .line { stroke: var(--vscode-textLink-foreground); stroke-width: 2.4; opacity: 1; }
   .graph-svg marker path { fill: var(--vscode-descriptionForeground); stroke: none; }
   .graph-svg marker .inferred-head { fill: var(--vscode-charts-orange, #d18616); }
 
@@ -794,8 +802,11 @@ const STYLES = `
   .graph-svg .edge-label-bg { fill: var(--vscode-editor-background);
                               stroke: var(--vscode-panel-border); stroke-width: 0.8; }
   .graph-svg .edge.active .edge-label-bg { stroke: var(--vscode-textLink-foreground); }
+  /* text-anchor is set per-label in the markup (centred on the track when labels
+     are hover-only, hung off its right when they are always on). A CSS rule here
+     would outrank that presentation attribute, so it must not set it. */
   .graph-svg .edge-label { font-size: 8.5px; fill: var(--vscode-foreground);
-                           text-anchor: middle; pointer-events: none; }
+                           pointer-events: none; }
   .graph-svg.labels-on .edge-label { font-size: 10px; }
 
   /* Expanded tab: the timeline is the page, so let it take the height. */
