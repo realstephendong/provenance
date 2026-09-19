@@ -153,6 +153,24 @@ SLACK_CHANNEL_IDS = [
     if c.strip()
 ]
 SLACK_CHANNEL_TIER = int(os.environ.get("SLACK_CHANNEL_TIER", "2"))
+# Per-channel override: "eng-incidents:1,eng-payments:1,social:3". A live workspace
+# has the same spread of signal and noise the seed corpus encoded in
+# channel_tiers.json, and one flat tier throws that signal away -- w_channel is
+# 1.5 / 1.0 / 0.7, so an incident channel and a watercooler channel rank the same
+# without this. Names are matched without the leading '#'.
+SLACK_CHANNEL_TIERS = {
+    name.strip().lstrip("#"): int(tier)
+    for name, _, tier in (
+        pair.partition(":")
+        for pair in os.environ.get("SLACK_CHANNEL_TIERS", "").split(",")
+    )
+    if name.strip() and tier.strip().isdigit()
+}
+
+
+def slack_tier_for(channel_name: str) -> int:
+    """Tier for a live Slack channel: explicit override, else the flat default."""
+    return SLACK_CHANNEL_TIERS.get(channel_name.lstrip("#"), SLACK_CHANNEL_TIER)
 # Incremental sync re-reads threads whose parent is this recent, to catch new replies.
 # Older-thread replies are picked up by `--mode reconcile`.
 SLACK_THREAD_LOOKBACK_DAYS = int(os.environ.get("SLACK_THREAD_LOOKBACK_DAYS", "14"))

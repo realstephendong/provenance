@@ -152,6 +152,10 @@ export function activate(context: vscode.ExtensionContext): void {
       if (selection) { await view.explain(selection, true); }
     }),
 
+    vscode.commands.registerCommand('provenance.openTimeline', () => {
+      view.openTimeline();
+    }),
+
     vscode.window.onDidChangeTextEditorSelection(() => status.schedule()),
     vscode.window.onDidChangeActiveTextEditor(() => status.schedule()),
 

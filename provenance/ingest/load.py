@@ -64,6 +64,24 @@ def ensure_index(es: Elasticsearch, recreate: bool = False) -> None:
     es.indices.create(index=config.INDEX, settings=INDEX_SETTINGS, mappings=INDEX_MAPPING)
 
 
+def stamp_source(es: Elasticsearch, source: str, detail: dict | None = None) -> None:
+    """Record where this index came from.
+
+    Without this, "am I querying the real workspace or the seed fixture?" can only
+    be answered by eyeballing permalinks. /health reads it back.
+    """
+    es.index(index=config.META_INDEX, id="source", document={
+        "source": source, "built_at": time.time(), **(detail or {}),
+    }, refresh=True)
+
+
+def read_source(es: Elasticsearch) -> dict | None:
+    try:
+        return es.get(index=config.META_INDEX, id="source")["_source"]
+    except Exception:
+        return None
+
+
 def stamp_embedder(es: Elasticsearch) -> None:
     es.index(index=config.META_INDEX, id="embedder", document={
         "embedder_id": config.EMBEDDER_ID, "dense_dim": config.DENSE_DIM, "built_at": time.time(),

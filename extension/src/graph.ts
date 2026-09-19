@@ -24,10 +24,32 @@ const MARGIN = 10;
 const RAIL_X = 18;
 const DOT_R = 5;
 const CARD_X = 40;
-const CARD_W = 250;
-const ARC_GUTTER = 56;      // right-hand channel the relationship arcs bow into
 const ROW_GAP = 14;
 const ANCHOR_GAP = 24;      // the selection is not a dated event; set it apart
+
+// Arc lanes. Every arc used to bow by `min(48, 12 + span * 8)`, which saturated:
+// on a four-PR supersede chain, ten of twenty-two arcs shared an identical 48px
+// bow and fused into one unreadable band. Arcs are now assigned to discrete
+// lanes by interval-overlap, so two arcs share a bow only when they cannot
+// collide vertically.
+const LANE_BASE = 18;       // bow of the innermost lane
+const LANE_STEP = 16;       // spacing between lanes
+const LANE_PAD = 16;        // breathing room past the outermost lane
+
+interface Metrics {
+  cardW: number;
+  laneStep: number;
+  labelsAtRest: boolean;
+  maxLanes: number;
+}
+
+const COMPACT: Metrics = { cardW: 250, laneStep: LANE_STEP, labelsAtRest: false, maxLanes: 5 };
+const FULL: Metrics = { cardW: 420, laneStep: 34, labelsAtRest: true, maxLanes: 14 };
+
+export interface RenderOptions {
+  /** Editor-tab timeline: wider cards, more lanes, labels on without hovering. */
+  fullscreen?: boolean;
+}
 
 interface TypeStyle {
   cssClass: string;
@@ -114,7 +136,9 @@ function chipWidth(label: string): number {
   return 14 + label.length * 5.4;
 }
 
-export function renderGraph(graph: Graph): string {
+export function renderGraph(graph: Graph, opts: RenderOptions = {}): string {
+  const M: Metrics = opts.fullscreen ? FULL : COMPACT;
+  const CARD_W = M.cardW;
   if (graph.nodes.length === 0) {
     return '<p class="empty">No structural evidence resolved for this selection.</p>';
   }
@@ -136,6 +160,11 @@ export function renderGraph(graph: Graph): string {
   // --- Fold satellites into their parent's card -----------------------------
   const chipsOf = new Map<string, GraphNode[]>();
   const foldedIn = new Set<string>();
+  // child -> the row-bearing node that swallowed it. Arcs touching a folded node
+  // are redirected here rather than dropped: a thread whose only structural link
+  // was REFERENCES -> a folded ticket used to render as an orphan, visually
+  // indistinguishable from a thread retrieved on similarity alone.
+  const parentOf = new Map<string, string>();
   for (const node of graph.nodes) {
     if (!SATELLITE_TYPES.has(node.type)) { continue; }
     const parent = neighboursOf(node.id)
@@ -143,6 +172,7 @@ export function renderGraph(graph: Graph): string {
     // A satellite nothing claims stays on the rail; it is still evidence.
     if (!parent) { continue; }
     foldedIn.add(node.id);
+    parentOf.set(node.id, parent);
     if (!chipsOf.has(parent)) { chipsOf.set(parent, []); }
     chipsOf.get(parent)!.push(node);
   }
@@ -182,9 +212,10 @@ export function renderGraph(graph: Graph): string {
     cursor += height;
   });
 
-  const canvasWidth = CARD_X + CARD_W + ARC_GUTTER + MARGIN;
   const canvasHeight = cursor + MARGIN;
   const rowOf = new Map(rows.map((r, i) => [r.node.id, { row: r, index: i }]));
+  /** A folded chip resolves to the card that carries it. */
+  const rowFor = (id: string) => rowOf.get(id) ?? rowOf.get(parentOf.get(id) ?? '');
 
   // --- The rail: one continuous spine, so nothing reads as free-floating ----
   let railMarkup = '';
@@ -203,22 +234,97 @@ export function renderGraph(graph: Graph): string {
   }
 
   // --- Relationship arcs in the right gutter --------------------------------
-  const arcMarkup = graph.edges.map((edge) => {
-    const from = rowOf.get(edge.source);
-    const to = rowOf.get(edge.target);
-    if (!from || !to || from.index === to.index) { return ''; }
-    const x0 = CARD_X + CARD_W;
-    const span = Math.abs(from.index - to.index);
-    const bow = Math.min(ARC_GUTTER - 8, 12 + span * 8);
-    const y0 = from.row.cy;
-    const y1 = to.row.cy;
+  // Resolve both ends to rows first (folding a chip must not delete its edge),
+  // drop self-loops, then dedupe: two REFERENCES from one thread to two tickets
+  // folded into the same PR card are one relationship as drawn.
+  interface Arc {
+    edge: GraphEdge;
+    a: number; b: number;       // row indices, a < b
+    y0: number; y1: number;     // source/target y, in edge direction
+    lane: number;
+  }
+
+  const arcs: Arc[] = [];
+  const seenPair = new Set<string>();
+  for (const edge of graph.edges) {
+    const from = rowFor(edge.source);
+    const to = rowFor(edge.target);
+    if (!from || !to || from.index === to.index) { continue; }
+    const key = `${Math.min(from.index, to.index)}:${Math.max(from.index, to.index)}:${edge.type}`;
+    if (seenPair.has(key)) { continue; }
+    seenPair.add(key);
+    arcs.push({
+      edge,
+      a: Math.min(from.index, to.index),
+      b: Math.max(from.index, to.index),
+      y0: from.row.cy,
+      y1: to.row.cy,
+      lane: 0,
+    });
+  }
+
+  // Lane assignment: greedy interval colouring over the rows an arc spans. Two
+  // arcs share a lane only when their row ranges are disjoint, so nothing in a
+  // lane can visually collide. Short arcs first keeps them nearest the cards.
+  arcs.sort((p1, p2) => (p1.b - p1.a) - (p2.b - p2.a) || p1.a - p2.a);
+  const laneRanges: Array<Array<[number, number]>> = [];
+  for (const arc of arcs) {
+    let lane = 0;
+    for (; lane < M.maxLanes; lane++) {
+      const taken = laneRanges[lane] ?? [];
+      if (!taken.some(([lo, hi]) => arc.a < hi && lo < arc.b)) { break; }
+    }
+    if (lane === M.maxLanes) { lane = M.maxLanes - 1; }   // saturate gracefully
+    arc.lane = lane;
+    (laneRanges[lane] ??= []).push([arc.a, arc.b]);
+  }
+
+  const laneCount = Math.max(1, laneRanges.length);
+  const bowOf = (lane: number) => LANE_BASE + lane * M.laneStep;
+  const gutter = bowOf(laneCount - 1) + LANE_PAD;
+  const canvasWidth = CARD_X + CARD_W + gutter + MARGIN;
+
+  // Endpoint fan-out: several arcs landing on one row used to stack their
+  // arrowheads on the identical pixel, on top of the card border. Spread them
+  // across the card's right edge and start them just clear of it.
+  const slots = new Map<number, number>();
+  const slotOf = (index: number): number => {
+    const n = slots.get(index) ?? 0;
+    slots.set(index, n + 1);
+    return n;
+  };
+  const FAN = 6;
+  const fanned = (cy: number, row: number, height: number): number => {
+    const k = slotOf(row);
+    const reach = Math.min((height - 14) / 2, FAN * 2);
+    const offset = ((k % 5) - 2) * (reach / 2.2);
+    return cy + offset;
+  };
+
+  const EDGE_GAP = 3;   // keep the head off the card's stroke
+  const arcMarkup = arcs.map((arc) => {
+    const { edge } = arc;
+    const fromIdx = rowFor(edge.source)!.index;
+    const toIdx = rowFor(edge.target)!.index;
+    const y0 = fanned(arc.y0, fromIdx, rows[fromIdx].height);
+    const y1 = fanned(arc.y1, toIdx, rows[toIdx].height);
+    const x0 = CARD_X + CARD_W + EDGE_GAP;
+    const bow = bowOf(arc.lane);
     const inferred = edge.confidence === 'llm-flagged';
+    const apexX = x0 + bow * 0.62;
+    const apexY = (y0 + y1) / 2;
+    const label = escapeHtml(edge.type.replace(/_/g, ' ').toLowerCase());
     return `
-      <g class="edge${inferred ? ' inferred' : ''}"
+      <g class="edge${inferred ? ' inferred' : ''}" data-lane="${arc.lane}"
          data-source="${escapeAttr(edge.source)}" data-target="${escapeAttr(edge.target)}">
+        <path class="hit" d="M ${x0} ${y0} C ${x0 + bow} ${y0}, ${x0 + bow} ${y1}, ${x0} ${y1}" />
         <path d="M ${x0} ${y0} C ${x0 + bow} ${y0}, ${x0 + bow} ${y1}, ${x0} ${y1}"
               marker-end="url(#arrow${inferred ? '-inferred' : ''})" />
-        <text class="edge-label" x="${x0 + bow * 0.7}" y="${(y0 + y1) / 2}">${escapeHtml(edge.type)}</text>
+        <g class="edge-label-g" transform="translate(${apexX} ${apexY})">
+          <rect class="edge-label-bg" x="${-label.length * 2.5 - 5}" y="-7"
+                width="${label.length * 5 + 10}" height="14" rx="7" />
+          <text class="edge-label" x="0" y="4">${label}</text>
+        </g>
       </g>`;
   }).join('');
 
@@ -281,19 +387,27 @@ export function renderGraph(graph: Graph): string {
       <button id="graph-zoom-in" class="graph-btn" title="Zoom in">+</button>
       <button id="graph-zoom-out" class="graph-btn" title="Zoom out">−</button>
       <button id="graph-zoom-reset" class="graph-btn" title="Fit to width">Fit</button>
+      ${opts.fullscreen ? '' : '<button id="graph-expand" class="graph-btn" title="Open the timeline in a full editor tab" aria-label="Expand timeline">⤢</button>'}
       <span class="graph-hint">oldest first · click a thread to open its evidence · ⌘/ctrl+scroll to zoom</span>
     </div>
     <div class="graph-viewport-outer" id="graph-viewport-outer">
-      <svg class="graph-svg" id="graph-svg" data-canvas-width="${canvasWidth}" data-canvas-height="${canvasHeight}"
+      <svg class="graph-svg${M.labelsAtRest ? ' labels-on' : ''}" id="graph-svg" data-canvas-width="${canvasWidth}" data-canvas-height="${canvasHeight}"
            viewBox="0 0 ${canvasWidth} ${canvasHeight}" width="${canvasWidth}" height="${canvasHeight}"
            role="img" aria-label="Provenance timeline">
         <defs>
-          <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5"
-                  markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <!-- refX must equal the tip's x or the head floats past the endpoint.
+               markerUnits=userSpaceOnUse keeps it one size: the default scales
+               by stroke-width, so heads grew whenever .edge.active thickened
+               the line. orient=auto (auto-start-reverse only affects
+               marker-start) points it along the curve's incoming tangent. -->
+          <marker id="arrow" viewBox="0 0 10 10" refX="10" refY="5"
+                  markerWidth="9" markerHeight="9"
+                  markerUnits="userSpaceOnUse" orient="auto">
             <path d="M 0 0 L 10 5 L 0 10 z" />
           </marker>
-          <marker id="arrow-inferred" viewBox="0 0 10 10" refX="9" refY="5"
-                  markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <marker id="arrow-inferred" viewBox="0 0 10 10" refX="10" refY="5"
+                  markerWidth="9" markerHeight="9"
+                  markerUnits="userSpaceOnUse" orient="auto">
             <path class="inferred-head" d="M 0 0 L 10 5 L 0 10 z" />
           </marker>
         </defs>

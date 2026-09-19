@@ -6,9 +6,15 @@
   "publisher": "provenance",
   "private": true,
   "license": "MIT",
-  "engines": { "vscode": "^1.85.0" },
-  "categories": ["Other"],
-  "activationEvents": ["onStartupFinished"],
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./out/extension.js",
   "contributes": {
     "viewsContainers": {
@@ -42,6 +48,10 @@
       {
         "command": "provenance.refresh",
         "title": "Provenance: Re-explain Selected Code (bypass cache)"
+      },
+      {
+        "command": "provenance.openTimeline",
+        "title": "Provenance: Open Timeline in Editor"
       }
     ],
     "keybindings": [
@@ -61,7 +71,10 @@
         }
       ],
       "commandPalette": [
-        { "command": "provenance.explainRange", "when": "false" }
+        {
+          "command": "provenance.explainRange",
+          "when": "false"
+        }
       ]
     },
     "configuration": {
