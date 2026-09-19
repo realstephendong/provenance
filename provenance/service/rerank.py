@@ -58,9 +58,11 @@ Return a JSON object: {{"synthesis": "...", "conflicts": [{{"a": 1, "b": 2, "kin
 if none apply."""
 
 _EXACT_WHY = {
-    3: "References the pull request that introduced these lines",
-    2: "References the commit that introduced these lines",
-    1: "Discusses the file these lines are in",
+    5: "References the pull request that introduced these lines",
+    4: "References the commit that introduced these lines",
+    3: "Discusses the file these lines are in",
+    2: "Names this file",
+    1: "Names an identifier used in these lines",
 }
 
 
@@ -89,6 +91,7 @@ async def rerank(hits: list[dict], description: str) -> list[dict]:
     semantic = [h for h in hits if h["match_type"] != "exact"]
     for hit in exact:
         hit["why"] = _EXACT_WHY.get(hit.get("exact_strength", 1), _EXACT_WHY[1])
+
 
     verdicts: dict[int, dict] = {}
     try:
@@ -131,7 +134,8 @@ async def rerank(hits: list[dict], description: str) -> list[dict]:
         kept.append(hit)
     kept.sort(key=lambda h: h.get("_order", len(hits)))
 
-    # Exact hits keep their own PR > SHA > path order and lead unconditionally.
+    # Exact hits keep their own PR > SHA > path > basename > symbol order and lead
+    # unconditionally.
     exact.sort(key=lambda h: -h.get("exact_strength", 0))
     return (exact + kept)[:config.RERANK_OUTPUT]
 

@@ -287,20 +287,23 @@ def resolve(
                 anchored = True
 
         if not anchored:
-            # Retrieved on similarity alone. Dashed, because nothing proved it.
+            # An exact-tier hit is proof even when it is not PR- or ticket-shaped: the
+            # thread named this file, or an identifier in it, by identity. Drawing that
+            # dashed says "nothing proved this" about a match that was asserted rather
+            # than scored, which is the opposite of 2.3.
             edges.append(models.GraphEdge(
                 source=code_id, target=slack_id, type="DISCUSSED_IN",
-                confidence="llm-flagged",
+                confidence="exact" if h.get("match_type") == "exact" else "llm-flagged",
             ))
 
     # With no commit anchor, every thread can still have reached the graph through a
     # PR or ticket of its own -- which would leave the selection itself sitting off to
     # one side, attached to nothing. Tie it to the evidence it retrieved.
     if not any(e.source == code_id or e.target == code_id for e in edges):
-        for slack_id in slack_ids:
+        for slack_id, hit in zip(slack_ids, hits):
             edges.append(models.GraphEdge(
                 source=code_id, target=slack_id, type="DISCUSSED_IN",
-                confidence="llm-flagged",
+                confidence="exact" if hit.get("match_type") == "exact" else "llm-flagged",
             ))
 
     citation_to_node = {

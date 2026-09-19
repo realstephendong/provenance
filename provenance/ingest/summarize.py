@@ -28,6 +28,7 @@ Thread:
 {thread_text}"""
 
 _SYMBOLS_LINE = re.compile(r"^\s*SYMBOLS\s*:\s*(.*)$", re.IGNORECASE | re.MULTILINE)
+_NO_SYMBOLS = {"none", "n/a", "na", "empty", "-", "(none)", "none."}
 FALLBACK_CHARS = 600
 
 
@@ -43,7 +44,14 @@ def _parse(raw: str, unit: Unit) -> tuple[str, list[str]]:
     symbols: list[str] = []
     match = _SYMBOLS_LINE.search(raw)
     if match:
-        symbols = [s.strip() for s in match.group(1).split(",") if s.strip()]
+        # The prompt says "Empty if none", and the model answers that literally often
+        # enough to matter: 11 of 38 documents in one live corpus carried `none` as a
+        # symbol. `symbols` is boosted in the lexical channel and is now compared as
+        # an identity by the exact tier, so a junk token there is not cosmetic.
+        symbols = [
+            s.strip() for s in match.group(1).split(",")
+            if s.strip() and s.strip().lower() not in _NO_SYMBOLS
+        ]
         raw = raw[:match.start()]
     summary = raw.strip()
     return (summary or unit.raw_text[:FALLBACK_CHARS]), symbols

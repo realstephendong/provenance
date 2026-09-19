@@ -134,6 +134,28 @@ FUSION_LIMIT = 20
 RERANK_INPUT = 20
 RERANK_OUTPUT = 5
 
+# A semantic hit is kept only if its dense cosine is within this fraction of the best
+# dense score *in the same request*. Without it, the null threshold is the only place
+# cosine magnitude is ever consulted again -- and that is a whole-request gate, so one
+# strong hit lets every weak one ride along behind it. Observed: a "print Hello World"
+# selection matched its own thread at 0.768 and a thread about how developers want to
+# understand decisions at 0.580, and the second was shown because the first cleared the
+# gate. Deliberately relative rather than absolute: an absolute cosine floor is
+# corpus- and model-specific and would need the same calibration NULL_THRESHOLD needs,
+# whereas a ratio re-derives itself on every query. Applied as the weaker of this and
+# NULL_THRESHOLD -- see `retrieve.semantic_floor`. Exact-tier hits are never subject
+# to it -- they are asserted, not scored (2.3).
+#
+# A consequence worth knowing: a BM25-only hit carries dense_score 0.0 (it never
+# appeared in the kNN list) and so is always below the floor. Lexical matches that are
+# genuinely structural now reach the exact tier by symbol instead.
+SEMANTIC_FLOOR_RATIO = 0.85
+
+# Shorter identifiers than this never enter the exact tier. A symbol match is asserted
+# evidence that no later stage may discard, so it has to be distinctive: `id`, `data`
+# and `run` are not.
+EXACT_SYMBOL_MIN_CHARS = 4
+
 TIME_SIGMA_SECONDS = 60 * 24 * 3600.0
 TIME_WEIGHT_FLOOR = 0.3
 AUTHOR_MATCH_BOOST = 1.25
