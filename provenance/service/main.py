@@ -25,6 +25,7 @@ from . import gitctx, graph as graph_mod, query_build, rerank, retrieve
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     config.require_api_key()      # 18 row 1: refuse to boot, not to fail first query
+    config.require_live_integrations()
     observability.init()
     yield
 
@@ -102,8 +103,13 @@ async def context(req: ContextRequest) -> ContextResponse:
     # so they intentionally do not sum to the request total.
     async def _blame():
         with _timed(timings, "git.blame"):
+            # with_history: the full `git log -L` walk of the range, so a PR the code
+            # no longer reflects still reaches the graph -- marked as superseded
+            # rather than passed off as a live constraint. The CodeLens path below
+            # deliberately does not ask for it.
             return await asyncio.to_thread(
-                gitctx.blame, req.repo_root, req.file_path, req.line_start, req.line_end
+                gitctx.blame, req.repo_root, req.file_path, req.line_start, req.line_end,
+                True,
             )
 
     async def _queries():

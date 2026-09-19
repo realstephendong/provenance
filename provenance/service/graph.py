@@ -14,8 +14,25 @@ those dashed.
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from .. import models
 from ..integrations import github, sentry_issues, tickets
+
+
+def _epoch(value: str | None) -> float | None:
+    """ISO-8601 (GitHub's `merged_at`, Sentry's `first_seen`) -> unix seconds.
+
+    Every node carries `ts` so one comparable number orders the whole graph. The
+    sources disagree on format -- git reports epoch seconds, the trackers report
+    ISO-8601 -- and resolving that here means no consumer has to.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
 
 
 def resolve(
@@ -58,31 +75,39 @@ def resolve(
             issue_id = node(
                 f"sentry:{issue['id']}", "SentryIssue", issue["id"],
                 {"title": issue.get("title"), "status": issue.get("status"),
-                 "first_seen": issue.get("first_seen")},
+                 "first_seen": issue.get("first_seen"),
+                 "ts": _epoch(issue.get("first_seen"))},
             )
             edges.append(models.GraphEdge(
                 source=pr_id, target=issue_id, type="RELATED_TO", confidence="exact"
             ))
 
-    def attach_pr(pr: int, commit_id: str) -> str:
-        pr_id = node(f"pr:{pr}", "PullRequest", f"PR #{pr}")
+    def attach_pr(pr: int, commit_id: str, fallback_ts: float | None = None) -> str:
+        # `fallback_ts` is the date of whatever reached this PR -- its commit, or the
+        # thread that named it. Only the forge knows a merge date, so without it a PR
+        # the adapters cannot answer for would be undated and sort to the end of the
+        # timeline, nowhere near the commit it belongs to.
+        pr_id = node(f"pr:{pr}", "PullRequest", f"PR #{pr}", {"ts": fallback_ts})
         edges.append(models.GraphEdge(
             source=commit_id, target=pr_id, type="PART_OF", confidence="exact"
         ))
         gh = github.lookup_by_pr(pr)
         if gh:
+            merged_ts = _epoch(gh.get("merged_at"))
             nodes[pr_id].data.update({
                 "title": gh.get("title"),
                 "author": gh.get("author"),
                 "merged_at": gh.get("merged_at"),
+                "ts": fallback_ts if merged_ts is None else merged_ts,
             })
         attach_pr_context(pr_id, pr)
         return pr_id
 
-    # One node per commit that owns a line of the range, not just the dominant one.
-    # A range edited twice has two authors, two dates and two PRs; collapsing it to a
-    # single node made the graph assert one origin it could not actually support, and
-    # hung every PR off whichever commit happened to win the line count.
+    # One node per commit in the range's history, oldest first -- both the ones that
+    # still own a line and, when blame was run with history, the ones since
+    # overwritten. A range edited twice has two authors, two dates and two PRs;
+    # collapsing it to a single node made the graph assert one origin it could not
+    # actually support, and hung every PR off whichever commit won the line count.
     commits = list(blame.commits)
     if not commits and blame.dominant_sha:
         # A BlameInfo built before `commits` existed (or by hand, as the eval suite
@@ -93,22 +118,33 @@ def resolve(
         )]
 
     dominant_commit_id: str | None = None
+    commit_ids: list[str] = []
     for c in commits:
         commit_id = node(
             f"commit:{c.sha}", "Commit", c.sha,
             {
                 "authors": [c.author] if c.author else [],
                 "date": c.date,
+                "ts": c.ts,
                 # `lines` is what makes "dominant" auditable rather than a bare flag.
                 "lines": c.lines,
                 "dominant": c.dominant,
+                "current": c.current,
             },
         )
-        if c.dominant or dominant_commit_id is None:
+        commit_ids.append(commit_id)
+        if c.dominant:
             dominant_commit_id = commit_id
-        edges.append(models.GraphEdge(
-            source=code_id, target=commit_id, type="CREATED_BY", confidence="exact"
-        ))
+        elif dominant_commit_id is None and c.current:
+            dominant_commit_id = commit_id
+
+        # Only a commit that still owns a line wrote the code as it reads today. A
+        # superseded one reaches the graph through the chain below instead, so the
+        # map cannot be misread as "all of these produced the current lines".
+        if c.current:
+            edges.append(models.GraphEdge(
+                source=code_id, target=commit_id, type="CREATED_BY", confidence="exact"
+            ))
 
         if c.author:
             person_id = node(f"person:{c.author}", "Person", c.author)
@@ -117,7 +153,20 @@ def resolve(
             ))
 
         if c.pr_number is not None:
-            attach_pr(c.pr_number, commit_id)
+            attach_pr(c.pr_number, commit_id, c.ts)
+
+    # The supersede chain. `commits` is oldest first, so whatever comes next in the
+    # chain replaced this commit's version of the range. This is asserted from git's
+    # own ordering, not inferred -- unlike the conflict edges below, which are the
+    # model's reading of two Slack threads. Without it, a PR whose decision the code
+    # no longer reflects sits in the graph looking exactly like a live constraint.
+    for i, c in enumerate(commits):
+        if c.current or i + 1 >= len(commits):
+            continue
+        edges.append(models.GraphEdge(
+            source=commit_ids[i + 1], target=commit_ids[i],
+            type="SUPERSEDES", confidence="exact",
+        ))
 
     if dominant_commit_id:
         # Anything the flat fields carry but the per-commit detail did not account for
@@ -133,7 +182,7 @@ def resolve(
                 ))
         for pr in blame.pr_numbers:
             if f"pr:{pr}" not in nodes:
-                attach_pr(pr, dominant_commit_id)
+                attach_pr(pr, dominant_commit_id, blame.commit_ts)
 
     slack_ids: list[str] = []
 
@@ -148,6 +197,7 @@ def resolve(
                 # the matching evidence card instead of only a detail drawer.
                 "citation": citation,
                 "date": p.get("date_str"),
+                "ts": p.get("ts_start"),
                 "permalink": p.get("permalink"),
                 "summary": p.get("summary", "")[:200],
             },
@@ -176,10 +226,13 @@ def resolve(
             # heard of still adds no node (18 row 23).
             gh = github.lookup_by_pr(pr)
             if gh:
+                merged_ts = _epoch(gh.get("merged_at"))
                 node(pr_id, "PullRequest", f"PR #{pr}", {
                     "title": gh.get("title"),
                     "author": gh.get("author"),
                     "merged_at": gh.get("merged_at"),
+                    # Undated by the forge: sit it with the thread that named it.
+                    "ts": p.get("ts_start") if merged_ts is None else merged_ts,
                 })
                 edges.append(models.GraphEdge(
                     source=slack_id, target=pr_id, type="REFERENCES", confidence="exact"
@@ -262,4 +315,14 @@ def resolve(
                 source=a, target=b, type=edge_type, confidence="llm-flagged"
             ))
 
-    return models.Graph(nodes=list(nodes.values()), edges=edges)
+    # One chronological order for every surface. The graph used to come back in
+    # resolution order -- every commit, then its PR, then the retrieved threads -- so
+    # the CLI and the MCP renderer printed the story out of sequence and only the
+    # extension bothered to sort. The selection itself leads: it is not a dated event,
+    # it is the thing being explained. Stable, so undated nodes (a ticket, a person)
+    # keep resolution order rather than shuffling between requests.
+    ordered = sorted(
+        nodes.values(),
+        key=lambda n: (n.id != code_id, n.data.get("ts") is None, n.data.get("ts") or 0.0),
+    )
+    return models.Graph(nodes=ordered, edges=edges)

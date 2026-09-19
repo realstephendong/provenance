@@ -1,16 +1,19 @@
 """Shared plumbing for the live (non-fixture) integration backends.
 
-Every adapter in this package has two backends:
+Every adapter in this package has two backends, and `config.USE_MOCK_DATA` picks
+between them for all of them at once:
 
   * the JSON fixtures under `seed/mock_integrations` -- the default. Offline,
     deterministic, no credentials, single-digit-millisecond.
-  * a real HTTP API, enabled per-adapter by filling in its credentials in `.env`.
+  * a real HTTP API, which additionally needs that adapter's credentials in `.env`.
 
-An adapter only goes live if *its own* variables are set, so the three can be
-migrated one at a time. Every live path degrades to the fixture on any failure:
-these lookups run inside `resolve_graph`, on the request path, and a provenance
-answer that is missing its ticket is still a useful answer, whereas a 500 from Jira
-that propagates is a broken feature. Nothing in this module raises.
+The backends never mix. A live call that fails returns None, which every caller reads
+as "no node for this one" -- not as "use the fixture", because answering a real
+repository's PR with seed data would fabricate the one thing this tool exists to
+establish. Failing soft still matters, though: these lookups run inside
+`resolve_graph`, on the request path, and an answer missing its ticket is still a
+useful answer whereas a 500 from Jira that propagates is a broken feature. Nothing in
+this module raises.
 
 The linkage each adapter needs -- "which incidents relate to PR #4821?" -- is not a
 first-class concept in Sentry or Jira the way it is in our fixtures. Where the live
@@ -45,8 +48,9 @@ def get_json(
     params: dict | None = None,
     auth: tuple[str, str] | None = None,
 ) -> Any | None:
-    """GET and decode JSON. Returns None on *any* failure, which every caller reads
-    as "fall back to the fixture"."""
+    """GET and decode JSON. Returns None on *any* failure, which every caller reads as
+    "this lookup contributes no node". Only ever reached with USE_MOCK_DATA off -- the
+    adapters answer from fixtures before dialling anything."""
     key = (url, tuple(sorted((params or {}).items())))
     now = time.monotonic()
 
@@ -70,7 +74,7 @@ def get_json(
         )
     except Exception as exc:
         _cooldown[host] = now
-        print(f"  ! {host} unreachable, using fixtures: {exc}")
+        print(f"  ! {host} unreachable, skipping this lookup: {exc}")
         return None
 
     # A 404 is a legitimate miss (that PR has no ticket), not an outage -- it must not
@@ -80,14 +84,14 @@ def get_json(
         return None
     if response.status_code >= 400:
         _cooldown[host] = now
-        print(f"  ! {host} returned {response.status_code}, using fixtures")
+        print(f"  ! {host} returned {response.status_code}, skipping this lookup")
         return None
 
     try:
         payload = response.json()
     except Exception:
         _cooldown[host] = now
-        print(f"  ! {host} returned a non-JSON body, using fixtures")
+        print(f"  ! {host} returned a non-JSON body, skipping this lookup")
         return None
 
     _cache[key] = (now, payload)

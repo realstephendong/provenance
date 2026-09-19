@@ -1,5 +1,7 @@
-"""Ticket-tracker adapter. Fixtures by default, Jira's REST API when JIRA_BASE_URL,
-JIRA_EMAIL and JIRA_TOKEN are all set.
+"""Ticket-tracker adapter. Fixtures while USE_MOCK_DATA is on, Jira's REST API once
+it is off and JIRA_BASE_URL, JIRA_EMAIL and JIRA_TOKEN are all set. With the flag off
+and no Jira configured, every lookup is empty: a PR with no ticket is an outcome the
+graph already draws.
 
 `lookup_by_pr` returns a *list*: nothing in the real world guarantees a 1:1
 PR-to-ticket mapping -- a PR can close two tickets. Callers handle zero, one, or many.
@@ -82,18 +84,14 @@ def _live_by_key(key: str) -> dict | None:
 # --- public interface ---------------------------------------------------------
 
 def lookup_by_pr(pr_number: int) -> list[dict]:
-    if live_enabled():
-        found = _live_by_pr(pr_number)
-        if found:
-            return found
+    if not config.USE_MOCK_DATA:
+        return _live_by_pr(pr_number) if live_enabled() else []
     return [t for t in _load() if t.get("pr_number") == pr_number]
 
 
 def lookup_by_key(key: str) -> dict | None:
-    if live_enabled():
-        found = _live_by_key(key)
-        if found:
-            return found
+    if not config.USE_MOCK_DATA:
+        return _live_by_key(key) if live_enabled() else None
     for t in _load():
         if t.get("key") == key:
             return t
