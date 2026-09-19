@@ -1,0 +1,20 @@
+# Local dev only. `xpack.security.enabled=false` means no auth and no TLS -- that is
+# acceptable because this container is never exposed beyond localhost for the demo.
+# Flag this explicitly if it ever runs anywhere but a laptop.
+services:
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.17.0
+    container_name: provenance-es
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms1g -Xmx1g"
+    ports:
+      - "9200:9200"
+    volumes:
+      - ./.es_storage:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30

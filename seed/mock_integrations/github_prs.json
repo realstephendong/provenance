@@ -1,0 +1,26 @@
+[
+  {
+    "number": 4100,
+    "title": "Add webhook retry with 5s backoff",
+    "author": "jordan-lee",
+    "merged_at": "2026-01-18T16:00:00Z",
+    "files": [
+      "webhooks/delivery.py"
+    ],
+    "commit_shas": [
+      "74924f9"
+    ]
+  },
+  {
+    "number": 4821,
+    "title": "Fix webhook retry backoff",
+    "author": "priya-raman",
+    "merged_at": "2026-02-11T14:32:00Z",
+    "files": [
+      "webhooks/delivery.py"
+    ],
+    "commit_shas": [
+      "0fb8a26"
+    ]
+  }
+]

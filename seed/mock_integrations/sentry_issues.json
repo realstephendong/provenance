@@ -1,0 +1,9 @@
+[
+  {
+    "id": "WEBHOOK-184",
+    "title": "Duplicate webhook delivery spike during failover window",
+    "first_seen": "2026-01-25T09:12:00Z",
+    "status": "resolved",
+    "pr_number": 4821
+  }
+]

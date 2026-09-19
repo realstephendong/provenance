@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+pydantic>=2
+openai>=1.0
+elasticsearch>=8.17,<9
+httpx
+python-dotenv
+sentry-sdk[fastapi,openai]
+mcp

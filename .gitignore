@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+.es_storage/
+node_modules/
+extension/out/
+extension/*.vsix
+seed/repo/
+seed/slack/
+.pytest_cache/

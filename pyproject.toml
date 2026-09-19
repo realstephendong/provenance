@@ -1,0 +1,28 @@
+# Present so the `provenance` console command in 15 actually exists after
+# `pip install -e .`. Everything else runs fine via `python -m ...`.
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "provenance"
+version = "1.0.0"
+description = "Recover the evidence chain behind a piece of code."
+requires-python = ">=3.12"
+dynamic = ["dependencies"]
+
+[project.scripts]
+provenance = "provenance.cli.main:main"
+
+[tool.setuptools]
+packages = [
+    "provenance",
+    "provenance.integrations",
+    "provenance.ingest",
+    "provenance.service",
+    "provenance.mcp_server",
+    "provenance.cli",
+]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
