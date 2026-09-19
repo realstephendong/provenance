@@ -113,6 +113,7 @@ USE_MOCK_DATA=false   # GitHub, Jira and Sentry for real; ingest defaults to liv
 |---|---|---|
 | GitHub / Jira / Sentry | `seed/mock_integrations/*.json` | their live APIs |
 | `python -m provenance.ingest` default source | `--source export` | `--source slack` |
+| [The Slack bot](#the-slack-bot) | always live Slack -- it indexes a real conversation either way | |
 | Credentials needed | none beyond `OPENAI_API_KEY` | `GITHUB_TOKEN` + `GITHUB_REPO`; Jira and Sentry optional |
 
 **The two backends never mix.** With the flag off there is no fixture fallback: an
@@ -429,7 +430,7 @@ provenance/
   models.py          the frozen contract shared by all four surfaces
   llm.py             the only module that calls OpenAI
   observability.py   Sentry, no-op when unconfigured
-  integrations/      mocked GitHub / tickets / incidents, as real adapter interfaces
+  integrations/      GitHub / tickets / incidents: fixtures or live, one adapter each
   ingest/            Slack -> Elasticsearch, three batch modes
   slackbot/          the on-demand bot: one conversation, indexed from Slack
   service/           the live /context pipeline
