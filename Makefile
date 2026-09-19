@@ -4,7 +4,8 @@ PYTHON ?= python3.12
 PY := .venv/bin/python
 
 .PHONY: install es seed ingest ingest-incremental reconcile serve mcp eval calibrate \
-        extension demo clean slack-check ingest-slack ingest-slack-incremental reconcile-slack
+        extension demo clean slack-check ingest-slack ingest-slack-incremental reconcile-slack \
+        slackbot
 
 install:
 	$(PYTHON) -m venv .venv
@@ -41,6 +42,11 @@ ingest-slack-incremental:
 
 reconcile-slack:
 	$(PY) -m provenance.ingest --source slack --mode reconcile
+
+# The on-demand bot: /provenance and the "Index in Provenance" message shortcut.
+# Needs SLACK_BOT_TOKEN and SLACK_APP_TOKEN on top of SLACK_USER_TOKEN. Long-running.
+slackbot:
+	$(PY) -m provenance.slackbot
 
 serve:
 	.venv/bin/uvicorn provenance.service.main:app --reload --port 8000

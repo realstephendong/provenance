@@ -93,7 +93,13 @@ def _split_oversized(unit: Unit) -> list[Unit]:
     return _split_oversized(left) + _split_oversized(right)
 
 
-def segment(messages: list[Message]) -> list[Unit]:
+def segment(messages: list[Message], *, min_messages: int | None = None) -> list[Unit]:
+    """`min_messages` overrides rule 3's floor. The Slack bot passes 1: it segments a
+    channel only to show someone which conversations exist and to find the one they
+    picked, and a unit too small to index on a batch scan is still a unit they can
+    point at. Nothing else overrides it -- batch ingest keeps the configured floor."""
+    floor = config.MIN_MESSAGES_PER_UNIT if min_messages is None else min_messages
+
     by_channel: dict[str, list[Message]] = {}
     for m in messages:
         by_channel.setdefault(m.channel_name, []).append(m)
@@ -130,10 +136,7 @@ def segment(messages: list[Message]) -> list[Unit]:
         split.extend(_split_oversized(u))
 
     # Rule 3 -- drop the trivially small, unless someone explicitly flagged it.
-    kept = [
-        u for u in split
-        if len(u.messages) >= config.MIN_MESSAGES_PER_UNIT or u.is_bookmarked
-    ]
+    kept = [u for u in split if len(u.messages) >= floor or u.is_bookmarked]
     kept.sort(key=lambda u: (u.channel_name, u.ts_start))
     return kept
 

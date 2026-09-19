@@ -1,4 +1,5 @@
-"""Elasticsearch writes: index creation, the embedder stamp, and idempotent upsert."""
+"""Elasticsearch writes: the document body, index creation, the embedder stamp, and
+idempotent upsert."""
 
 from __future__ import annotations
 
@@ -9,6 +10,8 @@ import uuid
 from elasticsearch import Elasticsearch
 
 from .. import config
+from .extract import extract_refs
+from .segment import Unit
 
 # 9.2. `thread_id` is mapped explicitly rather than left to dynamic mapping: it is a
 # dotted timestamp string and must stay an exact-match keyword.
@@ -39,6 +42,44 @@ INDEX_MAPPING = {
         "content_hash":  {"type": "keyword"},
     }
 }
+
+
+def build_payload(
+    unit: Unit, summary: str, llm_symbols: list[str], *, bookmark: bool = False
+) -> dict:
+    """One `Unit` -> the document body `upsert` writes (everything but the vector).
+
+    `bookmark=True` asserts that a human explicitly asked for this unit. Only the
+    Slack bot sets it: a batch scan can only read intent off a trigger reaction, an
+    on-demand request *is* the intent. It feeds `REACTION_BOOST` at query time.
+    """
+    refs = extract_refs(unit.raw_text)
+    symbols, seen = [], set()
+    for s in list(refs["symbols"]) + list(llm_symbols):
+        key = s.lower()
+        if key not in seen:
+            seen.add(key)
+            symbols.append(s)
+    return {
+        "thread_id": unit.thread_id,
+        "channel_id": unit.channel_id,
+        "channel_name": unit.channel_name,
+        "channel_tier": unit.channel_tier,
+        "permalink": unit.permalink,
+        "ts_start": unit.ts_start,
+        "ts_end": unit.ts_end,
+        "participants": unit.participants,
+        "message_count": len(unit.messages),
+        "summary": summary,
+        "raw_text": unit.raw_text,
+        "pr_refs": refs["pr_refs"],
+        "commit_shas": refs["commit_shas"],
+        "ticket_refs": refs["ticket_refs"],
+        "file_paths": refs["file_paths"],
+        "symbols": symbols,
+        "reactions": unit.reactions,
+        "is_bookmarked": unit.is_bookmarked or bookmark,
+    }
 
 
 def client() -> Elasticsearch:
