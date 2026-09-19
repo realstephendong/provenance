@@ -1,5 +1,5 @@
-"""Reads a Slack workspace export directory. This is the only ingestion path -- see
-2.6 on why a live API reader is not built."""
+"""Reads a Slack workspace export directory (the offline/seed path), and holds the
+`Message` model and per-message cleaning that the live reader (`slack_live`) shares."""
 
 from __future__ import annotations
 
@@ -36,6 +36,29 @@ def _clean(text: str, names: dict[str, str]) -> str:
     return text.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").strip()
 
 
+def to_message(
+    raw: dict, channel_id: str, channel_name: str, tier: int, names: dict[str, str]
+) -> Message | None:
+    """One raw Slack message object -> `Message`, or None if it isn't indexable.
+
+    Shared by the export reader and the live API reader (`slack_live`) so both apply
+    the same filtering and text cleaning.
+    """
+    if raw.get("type") != "message" or raw.get("subtype") in {"channel_join", "channel_leave"}:
+        return None
+    text = _clean(raw.get("text", ""), names)
+    if not text:
+        return None
+    uid = raw.get("user") or raw.get("bot_id") or "unknown"
+    return Message(
+        channel_id=channel_id, channel_name=channel_name, channel_tier=tier,
+        user_id=uid, user_name=names.get(uid, raw.get("username", uid)),
+        text=text, ts=float(raw["ts"]),
+        thread_ts=float(raw["thread_ts"]) if raw.get("thread_ts") else None,
+        reactions=[r["name"] for r in raw.get("reactions", [])],
+    )
+
+
 def load_export(export_dir: str | Path) -> list[Message]:
     root = Path(export_dir)
     if not root.is_dir():
@@ -69,18 +92,8 @@ def load_export(export_dir: str | Path) -> list[Message]:
                 print(f"  ! skipping malformed export file {day_file}: {exc}")
                 continue
             for m in raw_messages:
-                if m.get("type") != "message" or m.get("subtype") in {"channel_join", "channel_leave"}:
-                    continue
-                text = _clean(m.get("text", ""), names)
-                if not text:
-                    continue
-                uid = m.get("user") or m.get("bot_id") or "unknown"
-                out.append(Message(
-                    channel_id=cid, channel_name=cname, channel_tier=tier,
-                    user_id=uid, user_name=names.get(uid, m.get("username", uid)),
-                    text=text, ts=float(m["ts"]),
-                    thread_ts=float(m["thread_ts"]) if m.get("thread_ts") else None,
-                    reactions=[r["name"] for r in m.get("reactions", [])],
-                ))
+                msg = to_message(m, cid, cname, tier, names)
+                if msg is not None:
+                    out.append(msg)
     out.sort(key=lambda m: (m.channel_name, m.ts))
     return out

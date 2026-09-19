@@ -137,4 +137,25 @@ INGEST_CHECKPOINT_FILE = f"{WORKSPACE_STATE_DIR}/ingest_checkpoint.json"
 
 # --- Slack export rendering ----------------------------------------------------
 # Only used to build permalinks for an export that carries no permalink of its own.
+# The live reader (ingest/slack_live.py) overwrites this from `auth.test` at run time.
 SLACK_WORKSPACE = os.environ.get("SLACK_WORKSPACE", "acme")
+
+# --- Live Slack (ingest --source slack) ------------------------------------------
+# The only value a person has to fill in is SLACK_USER_TOKEN. Team and channel default
+# to the workspace this project indexes. Blank token = live Slack is off; it never
+# falls back to seed data, because `--source slack` is an explicit request.
+SLACK_API = os.environ.get("SLACK_API", "https://slack.com/api").rstrip("/")
+SLACK_USER_TOKEN = os.environ.get("SLACK_USER_TOKEN", "").strip()
+SLACK_TEAM_ID = os.environ.get("SLACK_TEAM_ID", "T0C34UQUW68").strip()
+SLACK_CHANNEL_IDS = [
+    c.strip()
+    for c in os.environ.get("SLACK_CHANNEL_IDS", "C0C34DY037B").split(",")
+    if c.strip()
+]
+SLACK_CHANNEL_TIER = int(os.environ.get("SLACK_CHANNEL_TIER", "2"))
+# Incremental sync re-reads threads whose parent is this recent, to catch new replies.
+# Older-thread replies are picked up by `--mode reconcile`.
+SLACK_THREAD_LOOKBACK_DAYS = int(os.environ.get("SLACK_THREAD_LOOKBACK_DAYS", "14"))
+SLACK_TIMEOUT_SECONDS = 30.0
+SLACK_MAX_RETRIES = 5
+SLACK_PAGE_SIZE = 200

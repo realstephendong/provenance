@@ -1,0 +1,29 @@
+# Slack app manifest for Provenance's live Slack ingest.
+#
+# Create it at https://api.slack.com/apps -> Create New App -> From a manifest, in the
+# workspace you want to read, then Install to Workspace and copy the "User OAuth Token"
+# (xoxp-...) into SLACK_USER_TOKEN in .env.
+#
+# Keep it an INTERNAL app: never enable distribution or list it in the Marketplace. Since
+# 2025-05-29 Slack limits conversations.history / conversations.replies to 1 request per
+# minute (15 messages each) for distributed non-Marketplace apps; internal apps keep the
+# normal limits, which a full-history backfill needs.
+#
+# Everything here is read-only and requested as a *user* scope, so the token can see
+# exactly what you can see in Slack and nothing more. Reactions arrive with the message
+# payload, so no reactions:read is needed.
+display_information:
+  name: Provenance (read-only)
+  description: Reads one Slack channel so Provenance can index it locally.
+oauth_config:
+  scopes:
+    user:
+      - channels:history
+      - channels:read
+      - groups:history
+      - groups:read
+      - users:read
+settings:
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false
