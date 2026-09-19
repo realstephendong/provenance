@@ -54,6 +54,8 @@ For the extension: `make extension`, then open `extension/` in VS Code and press
   calls are `service/gitctx.py`, the exact retrieval tier, `service/graph.py`, and
   the extension and CLI rendering layers.
 - **`SENTRY_DSN` is optional.** Unset, `observability.py` no-ops every call.
+- **`SLACK_USER_TOKEN` is only needed for live Slack** — see [Connecting to Slack](#connecting-to-slack).
+  The seed demo needs no Slack account.
 
 ---
 
@@ -108,12 +110,74 @@ deterministic document id makes the re-index a transparent overwrite.
 `--mode reconcile` classifies every unit as `missing` / `changed` / `stale` by content
 hash, reprocesses the first two, and deletes the third.
 
-**Deliberately not built:** a live Slack connection — no OAuth, no Events API webhook
-receiver. Ingest reads a static export directory. This is a scope boundary, not an
-oversight: the backfill/incremental/reconcile lifecycle around that export is the part
-of a real ingestion system that's actually worth demonstrating, and it doesn't need
-live infrastructure. `--mode incremental` and `--mode reconcile` against a refreshed
-export are the substitute mechanism.
+Each mode reads its source **before** it writes, deletes or checkpoints anything, so a
+failed read (a Slack outage, a rate limit) leaves the index as it was.
+
+Ingest has two sources: a static export directory (`--source export`, the seed demo
+above) and the live Slack channel (`--source slack`, next section). Both feed the same
+pipeline. Still **not** built: an OAuth login flow and an Events API webhook receiver —
+you paste a token, and `--mode incremental` / `--mode reconcile` are the sync mechanism.
+
+---
+
+## Connecting to Slack
+
+Each person indexes the channel **with their own Slack login**, into their **own local**
+Elasticsearch. So what you can index is exactly what Slack lets you see, and there is no
+shared index or service-side auth to configure. The channel is `C0C34DY037B` in workspace
+`T0C34UQUW68` (both pre-filled in `.env.example`).
+
+Slack's API does not accept a username and password, so your "login" is a **User OAuth
+Token** (`xoxp-…`). It is the only value you fill in.
+
+**One-time setup**
+
+1. In workspace `T0C34UQUW68`, go to <https://api.slack.com/apps> → **Create New App** →
+   **From a manifest**, and paste [`slack_app_manifest.yml`](slack_app_manifest.yml).
+   It asks only for read-only *user* scopes. **Keep it an internal app — never
+   distribute it.** Since 2025-05-29 Slack limits `conversations.history` and
+   `conversations.replies` to 1 request/minute (15 messages each) for distributed
+   non-Marketplace apps, which makes a full-history backfill impractical. Internal apps
+   keep the normal limits.
+2. **Install to Workspace.** If your workspace requires it, an admin has to approve the
+   app first.
+3. Copy the **User OAuth Token** from *OAuth & Permissions* into `.env`:
+   `SLACK_USER_TOKEN=xoxp-...`
+
+**Check access, then ingest**
+
+```bash
+make slack-check      # do I have access to the channel? prints ACCESS OK or NO ACCESS + why
+make es
+make ingest-slack     # entire channel history -> Elasticsearch (drops and rebuilds the index)
+make serve
+```
+
+`make ingest-slack` runs the same check first and stops with the verdict if you don't have
+access, before any OpenAI spend. On Windows without `make`, run the commands directly:
+
+```bash
+python -m provenance.ingest.slack_check
+python -m provenance.ingest --source slack --mode backfill --recreate
+python -m provenance.ingest --source slack --mode incremental      # later, to catch up
+python -m provenance.ingest --source slack --mode reconcile        # edits/deletes/old threads
+```
+
+`slack-check` tells you which of these is wrong: no token, a bad or revoked token, a token
+for the wrong workspace, a private channel you are not a member of, or a missing scope.
+
+**Keeping it in sync.** `incremental` re-reads the last few days and threads whose parent is
+newer than `SLACK_THREAD_LOOKBACK_DAYS` (default 14). A reply to an older thread, an edit,
+a deletion, or a channel newly added to `SLACK_CHANNEL_IDS` is picked up by `reconcile`.
+
+**Things to know before you paste a token**
+
+- `.env` is gitignored, but this folder may live in OneDrive or another synced location,
+  which uploads it. Treat the token like a password; revoke it from the Slack app page if
+  it leaks.
+- Message text is sent to OpenAI (summaries and embeddings) and stored in your local
+  Elasticsearch, which runs with security disabled (`docker-compose.yml`). That is fine
+  for your own machine; do not point it at a shared server.
 
 ---
 
@@ -223,7 +287,8 @@ no caller changes.
 
 ## Non-goals
 
-Live Slack OAuth and Events API webhooks; a channel-approval UI; real
+A Slack OAuth login flow and Events API webhooks (live Slack is read with a pasted user
+token instead); per-user filtering on a shared index; a channel-approval UI; real
 GitHub/ticket/error-tracker APIs (mocked by design, not by omission); multi-repository
 support; auth on the FastAPI service; embedding-based topic-shift segmentation;
 an offline/fake-LLM mode; a second retrieval implementation for the terminal or MCP

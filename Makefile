@@ -4,7 +4,7 @@ PYTHON ?= python3.12
 PY := .venv/bin/python
 
 .PHONY: install es seed ingest ingest-incremental reconcile serve mcp eval calibrate \
-        extension demo clean
+        extension demo clean slack-check ingest-slack ingest-slack-incremental reconcile-slack
 
 install:
 	$(PYTHON) -m venv .venv
@@ -28,6 +28,19 @@ ingest-incremental:
 
 reconcile:
 	$(PY) -m provenance.ingest --export seed/slack --mode reconcile
+
+# Live Slack: needs SLACK_USER_TOKEN in .env (see README, "Connecting to Slack").
+slack-check:
+	$(PY) -m provenance.ingest.slack_check
+
+ingest-slack:
+	$(PY) -m provenance.ingest --source slack --mode backfill --recreate
+
+ingest-slack-incremental:
+	$(PY) -m provenance.ingest --source slack --mode incremental
+
+reconcile-slack:
+	$(PY) -m provenance.ingest --source slack --mode reconcile
 
 serve:
 	.venv/bin/uvicorn provenance.service.main:app --reload --port 8000

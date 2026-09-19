@@ -1,0 +1,158 @@
+"""Does the token in `.env` give this person access to the Slack channel?
+
+    python -m provenance.ingest.slack_check        (or: make slack-check)
+
+Runs four real checks against Slack -- token present, token valid and for the right
+workspace, channel visible, channel readable -- prints one line per step and a plain
+verdict per channel, and exits 0 only if every configured channel is readable. The
+answer is empirical rather than inferred from scopes, so it is right for public and
+private channels alike.
+
+`check_access` is also the gate for `ingest --source slack`, so a person without access
+is told so before any OpenAI spend.
+"""
+
+from __future__ import annotations
+
+import sys
+from collections.abc import Callable
+from dataclasses import dataclass, field
+
+from .. import config
+from .slack_client import SlackClient, SlackError
+
+NO_TOKEN_HELP = """\
+SLACK_USER_TOKEN is not set.
+
+  1. Create a Slack app from slack_app_manifest.yml in your workspace
+     (https://api.slack.com/apps -> Create New App -> From a manifest).
+     It must stay an internal app -- do not distribute it.
+  2. Install it to the workspace (an admin may have to approve it).
+  3. Copy the "User OAuth Token" (starts with xoxp-) from "OAuth & Permissions".
+  4. Put it in .env:   SLACK_USER_TOKEN=xoxp-...
+  5. Run this check again.
+
+Full steps: "Connecting to Slack" in README.md."""
+
+_BAD_TOKEN = {"invalid_auth", "not_authed", "token_revoked", "token_expired", "account_inactive"}
+
+
+@dataclass
+class ChannelAccess:
+    channel_id: str
+    name: str = ""
+    ok: bool = False
+    reason: str = ""      # why not, when ok is False
+    fix: str = ""
+
+
+@dataclass
+class AccessReport:
+    ok: bool = False
+    user: str = ""
+    team_id: str = ""
+    workspace_url: str = ""
+    channels: list[ChannelAccess] = field(default_factory=list)
+    error: str = ""       # a token/workspace-level failure that stops the check early
+
+
+def _explain(err: SlackError, channel_id: str) -> tuple[str, str]:
+    """(reason, fix) in plain words for a Slack error on a channel call."""
+    if err.code == "channel_not_found":
+        return (
+            f"channel {channel_id} is not visible to you",
+            "it is private and you are not a member, or the channel ID is wrong -- "
+            "ask a member to add you",
+        )
+    if err.code == "not_in_channel":
+        return "you are not a member of the channel", "join the channel in Slack"
+    if err.code == "missing_scope":
+        needed = err.needed or "the channels:*/groups:* history and read scopes"
+        return (
+            f"your token is missing a scope ({needed})",
+            "add it under 'User Token Scopes' (slack_app_manifest.yml lists them) "
+            "and reinstall the app, then copy the new token",
+        )
+    if err.code in _BAD_TOKEN:
+        return "Slack rejected your token", "generate a new User OAuth Token and update .env"
+    if err.code == "access_denied":
+        return "Slack denied access to this channel", "ask a workspace admin or channel member"
+    return f"Slack returned '{err.code}'", "re-run; if it persists, check the Slack app's settings"
+
+
+def check_access(
+    client: SlackClient,
+    team_id: str,
+    channel_ids: list[str],
+    say: Callable[[str], None] = print,
+) -> AccessReport:
+    report = AccessReport()
+
+    try:
+        auth = client.call("auth.test")
+    except SlackError as exc:
+        reason, fix = _explain(exc, "")
+        report.error = f"{reason} -> {fix}"
+        say(f"  [x] token: {reason}")
+        return report
+    report.user = auth.get("user", "")
+    report.team_id = auth.get("team_id", "")
+    report.workspace_url = auth.get("url", "")
+    say(f"  [ok] token valid: signed in as @{report.user} in '{auth.get('team', '?')}'")
+
+    if team_id and report.team_id != team_id:
+        report.error = (
+            f"this token is for workspace {report.team_id}, but SLACK_TEAM_ID is {team_id} "
+            "-> install the app in the right workspace and use that token"
+        )
+        say(f"  [x] workspace: {report.error}")
+        return report
+    say(f"  [ok] workspace: {report.team_id}")
+
+    for cid in channel_ids:
+        access = ChannelAccess(channel_id=cid)
+        report.channels.append(access)
+        try:
+            info = client.call("conversations.info", channel=cid)
+            channel = info.get("channel", {})
+            access.name = channel.get("name", cid)
+            say(f"  [ok] channel visible: #{access.name} ({cid})")
+            client.call("conversations.history", channel=cid, limit=1)
+            say(f"  [ok] channel readable: #{access.name}")
+            access.ok = True
+        except SlackError as exc:
+            access.reason, access.fix = _explain(exc, cid)
+            say(f"  [x] {cid}: {access.reason}")
+
+    report.ok = bool(report.channels) and all(c.ok for c in report.channels)
+    return report
+
+
+def verdict_lines(report: AccessReport) -> list[str]:
+    if report.error:
+        return [f"NO ACCESS: {report.error}"]
+    if not report.channels:
+        return ["NO ACCESS: no channels configured -> set SLACK_CHANNEL_IDS in .env"]
+    return [
+        f"ACCESS OK: #{c.name}" if c.ok else f"NO ACCESS: #{c.name or c.channel_id}: {c.reason} -> {c.fix}"
+        for c in report.channels
+    ]
+
+
+def main() -> None:
+    if not config.SLACK_USER_TOKEN:
+        print(NO_TOKEN_HELP)
+        sys.exit(1)
+
+    print(f"Checking Slack access (workspace {config.SLACK_TEAM_ID}, "
+          f"channels {', '.join(config.SLACK_CHANNEL_IDS) or '-'})")
+    with SlackClient(config.SLACK_USER_TOKEN) as client:
+        report = check_access(client, config.SLACK_TEAM_ID, config.SLACK_CHANNEL_IDS)
+    print()
+    for line in verdict_lines(report):
+        print(line)
+    sys.exit(0 if report.ok else 1)
+
+
+if __name__ == "__main__":
+    main()

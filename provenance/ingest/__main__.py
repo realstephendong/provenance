@@ -1,10 +1,15 @@
-"""Ingest entrypoint: Slack export -> Elasticsearch, in three modes.
+"""Ingest entrypoint: Slack -> Elasticsearch, in three modes.
 
     python -m provenance.ingest --export seed/slack --mode backfill [--recreate]
     python -m provenance.ingest --export seed/slack --mode incremental
     python -m provenance.ingest --export seed/slack --mode reconcile
 
-All three share one pipeline (segment -> extract -> summarize -> embed -> load) and
+    python -m provenance.ingest --source slack --mode backfill [--recreate]   # live Slack
+
+`--source export` (default) reads a Slack export directory; `--source slack` reads the
+live channel with the token in `.env` and refuses to start unless that token can read it.
+
+All modes share one pipeline (segment -> extract -> summarize -> embed -> load) and
 differ only in which units they feed it. Because `load.point_id` is deterministic,
 every mode is idempotent: re-processing a unit overwrites its document in place.
 """
@@ -14,15 +19,21 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from .. import config
 from . import checkpoint as checkpoint_store
-from . import load, summarize
+from . import load, slack_check, slack_live, summarize
 from .embed import embed_summaries
 from .extract import extract_refs
 from .segment import Unit, group_by_channel, segment
+from .slack_client import SlackClient, SlackError
 from .slack_source import Message, load_export
+
+# A message source: `oldest` (unix ts) -> messages. The export reader ignores `oldest`
+# and always returns everything; the live reader uses it to bound the API calls.
+Loader = Callable[[float], list[Message]]
 
 
 def _payload(unit: Unit, summary: str, llm_symbols: list[str]) -> dict:
@@ -76,11 +87,14 @@ async def process_units(es, units: list[Unit]) -> int:
 # --- mode: backfill -----------------------------------------------------------
 
 
-async def run_backfill(export_dir: Path, checkpoint_path: Path, recreate: bool) -> None:
+async def run_backfill(source: Loader, checkpoint_path: Path, recreate: bool) -> None:
+    # Read first: with --recreate the index is dropped below, and a failed source read
+    # (a Slack outage, a rate limit) must not leave the person with an empty index.
+    messages = source(0.0)
+
     es = load.client()
     load.ensure_index(es, recreate=recreate)
 
-    messages = load_export(export_dir)
     units = segment(messages)
     print(f"backfill: {len(messages)} messages -> {len(units)} units")
     await process_units(es, units)
@@ -161,12 +175,27 @@ def affected_messages(all_messages: list[Message], new_messages: list[Message]) 
     return _dedupe_by_identity(affected)
 
 
-async def run_incremental(export_dir: Path, checkpoint_path: Path) -> None:
+def incremental_oldest(state: dict) -> float:
+    """How far back a live source must read for an incremental run.
+
+    `affected_messages` needs the surrounding pool, not just new messages: a burst can
+    continue from up to SEGMENT_GAP_SECONDS before the checkpoint, and recent threads
+    can have gained replies. Threads whose parent is older than the lookback are left
+    to `--mode reconcile`, as is a channel newly added to SLACK_CHANNEL_IDS.
+    """
+    last = [entry.get("last_ts", 0.0) for entry in state.values()]
+    if not last:
+        return 0.0
+    margin = config.SEGMENT_GAP_SECONDS + config.SLACK_THREAD_LOOKBACK_DAYS * 86400
+    return max(0.0, min(last) - margin)
+
+
+async def run_incremental(source: Loader, checkpoint_path: Path) -> None:
     es = load.client()
     load.ensure_index(es)
 
-    all_messages = load_export(export_dir)
     state = checkpoint_store.load(checkpoint_path)
+    all_messages = source(incremental_oldest(state))
 
     new_messages = [
         m for m in all_messages
@@ -191,18 +220,20 @@ async def run_incremental(export_dir: Path, checkpoint_path: Path) -> None:
 # --- mode: reconcile -----------------------------------------------------------
 
 
-async def run_reconcile(export_dir: Path) -> None:
-    """Drift detection between the export and the index.
+async def run_reconcile(source: Loader) -> None:
+    """Drift detection between the source and the index.
 
-    Stands in for "webhooks got missed" in a system with no live webhooks to miss.
+    Stands in for "webhooks got missed" in a system with no live webhooks to miss, and
+    is what catches edits, deletions, replies to old threads and newly added channels.
     Known scaling limit, stated rather than solved: this re-segments the entire
-    export on every run. That is cheap (no LLM calls) but O(total messages); at real
-    scale you would shard by channel and date with per-channel cursors.
+    source on every run. That is cheap (no LLM calls) but O(total messages), and with
+    `--source slack` it re-reads the whole channel through the API; at real scale you
+    would shard by channel and date with per-channel cursors.
     """
     es = load.client()
     load.ensure_index(es)
 
-    all_messages = load_export(export_dir)
+    all_messages = source(0.0)
     units = segment(all_messages)
     current_by_id = {
         load.point_id(u.channel_id, u.thread_id): load.content_hash(u.raw_text) for u in units
@@ -230,9 +261,30 @@ async def run_reconcile(export_dir: Path) -> None:
 # --- entrypoint -----------------------------------------------------------------
 
 
+def _slack_source() -> Loader:
+    """Verify the person's token can read the channel, then return a live loader.
+
+    Exits with the plain-language verdict if it can't -- before any Elasticsearch or
+    OpenAI work, and without ever falling back to seed data.
+    """
+    if not config.SLACK_USER_TOKEN:
+        sys.exit(slack_check.NO_TOKEN_HELP)
+
+    print("checking Slack access...")
+    client = SlackClient(config.SLACK_USER_TOKEN)
+    report = slack_check.check_access(client, config.SLACK_TEAM_ID, config.SLACK_CHANNEL_IDS)
+    if not report.ok:
+        client.close()
+        sys.exit("\n".join(slack_check.verdict_lines(report)))
+    return lambda oldest: slack_live.load_slack(client, report, oldest)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="python -m provenance.ingest", description=__doc__)
-    parser.add_argument("--export", required=True, help="path to the Slack export directory")
+    parser.add_argument("--source", default="export", choices=["export", "slack"],
+                        help="export = a Slack export directory; slack = the live channel "
+                             "(needs SLACK_USER_TOKEN in .env)")
+    parser.add_argument("--export", help="path to the Slack export directory (--source export)")
     parser.add_argument("--mode", default="backfill", choices=["backfill", "incremental", "reconcile"])
     parser.add_argument("--recreate", action="store_true",
                         help="drop and rebuild the index first (backfill only)")
@@ -241,6 +293,10 @@ def main() -> None:
 
     if args.recreate and args.mode != "backfill":
         parser.error("--recreate is only valid with --mode backfill")
+    if args.source == "export" and not args.export:
+        parser.error("--export is required with --source export")
+    if args.source == "slack" and args.export:
+        parser.error("--export can't be combined with --source slack")
 
     # 18 row 1: refuse to boot without a key, rather than fail on the first call
     # after an expensive segmentation pass.
@@ -249,15 +305,24 @@ def main() -> None:
     except config.MissingAPIKey as exc:
         sys.exit(str(exc))
 
-    export_dir = Path(args.export)
+    if args.source == "slack":
+        source = _slack_source()
+    else:
+        export_dir = Path(args.export)
+        source = lambda oldest: load_export(export_dir)  # noqa: E731 -- export ignores `oldest`
     checkpoint_path = Path(args.checkpoint)
 
-    if args.mode == "backfill":
-        asyncio.run(run_backfill(export_dir, checkpoint_path, args.recreate))
-    elif args.mode == "incremental":
-        asyncio.run(run_incremental(export_dir, checkpoint_path))
-    else:
-        asyncio.run(run_reconcile(export_dir))
+    try:
+        if args.mode == "backfill":
+            asyncio.run(run_backfill(source, checkpoint_path, args.recreate))
+        elif args.mode == "incremental":
+            asyncio.run(run_incremental(source, checkpoint_path))
+        else:
+            asyncio.run(run_reconcile(source))
+    except SlackError as exc:
+        # Every mode reads the source before it writes, deletes or checkpoints anything,
+        # so a failed read leaves the index and checkpoint as they were.
+        sys.exit(f"Slack read failed: {exc}")
 
 
 if __name__ == "__main__":
