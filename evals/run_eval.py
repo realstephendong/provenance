@@ -83,12 +83,19 @@ def run_suite(repo: Path, service_url: str) -> int:
             _check("returns a message", bool(data.get("message")),
                    repr(data.get("message")), failures)
         else:
-            for channel, date in expected:
-                if (channel, date) in found:
-                    rank = found.index((channel, date)) + 1
-                    _check(f"evidence #{channel} {date}", True, f"rank {rank}", failures)
+            for channel, marker in expected:
+                rank = None
+                for i, r in enumerate(results, 1):
+                    if r.get("channel_name") != channel:
+                        continue
+                    hay = f"{r.get('summary', '')} {r.get('raw_text', '')}".lower()
+                    if marker.lower() in hay:
+                        rank = i
+                        break
+                if rank is not None:
+                    _check(f"evidence #{channel} ~ {marker!r}", True, f"rank {rank}", failures)
                 else:
-                    _check(f"evidence #{channel} {date}", False,
+                    _check(f"evidence #{channel} ~ {marker!r}", False,
                            f"absent (got {found})", failures)
 
             _check("synthesis present", bool(data.get("synthesis")),

@@ -87,7 +87,7 @@ def load_slack(client: SlackClient, report: AccessReport, oldest: float = 0.0) -
         kept = [
             msg for m in raw
             if (msg := to_message(m, channel.channel_id, channel.name,
-                                  config.SLACK_CHANNEL_TIER, names)) is not None
+                                  config.slack_tier_for(channel.name), names)) is not None
         ]
         print(f"  #{channel.name}: {len(raw)} messages fetched, {len(kept)} indexable")
         out.extend(kept)

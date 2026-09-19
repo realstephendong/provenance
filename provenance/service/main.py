@@ -63,6 +63,10 @@ def health() -> dict:
         out["index_exists"] = bool(es.indices.exists(index=config.INDEX))
         out["embedder_id"] = load.read_embedder_id(es)
         out["expected_embedder_id"] = config.EMBEDDER_ID
+        if out["index_exists"]:
+            out["docs"] = int(es.count(index=config.INDEX)["count"])
+        # Which corpus is actually being served: live Slack or a seed export.
+        out["source"] = load.read_source(es)
         out["ok"] = bool(out["index_exists"]) and out["embedder_id"] == config.EMBEDDER_ID
     except Exception as exc:
         out["error"] = str(exc)

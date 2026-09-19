@@ -87,7 +87,8 @@ async def process_units(es, units: list[Unit]) -> int:
 # --- mode: backfill -----------------------------------------------------------
 
 
-async def run_backfill(source: Loader, checkpoint_path: Path, recreate: bool) -> None:
+async def run_backfill(source: Loader, checkpoint_path: Path, recreate: bool,
+                       source_label: str = 'unknown', source_detail: dict | None = None) -> None:
     # Read first: with --recreate the index is dropped below, and a failed source read
     # (a Slack outage, a rate limit) must not leave the person with an empty index.
     messages = source(0.0)
@@ -105,6 +106,13 @@ async def run_backfill(source: Loader, checkpoint_path: Path, recreate: bool) ->
         entry["last_ts"] = max(entry["last_ts"], unit.ts_end)
     checkpoint_store.save(checkpoint_path, state)
     load.stamp_embedder(es)
+    # Re-read the workspace here, not at dispatch: slack_live rewrites
+    # config.SLACK_WORKSPACE from auth.test once the source has actually run,
+    # so capturing it earlier stamps the "acme" placeholder.
+    detail = dict(source_detail or {})
+    if source_label == "slack":
+        detail["workspace"] = config.SLACK_WORKSPACE
+    load.stamp_source(es, source_label, detail)
     print(f"  checkpoint -> {checkpoint_path}")
     print(f"  embedder stamped: {config.EMBEDDER_ID}")
 
@@ -307,14 +315,21 @@ def main() -> None:
 
     if args.source == "slack":
         source = _slack_source()
+        source_detail = {
+            "workspace": config.SLACK_WORKSPACE,
+            "team_id": config.SLACK_TEAM_ID,
+            "channels": config.SLACK_CHANNEL_IDS,
+        }
     else:
         export_dir = Path(args.export)
         source = lambda oldest: load_export(export_dir)  # noqa: E731 -- export ignores `oldest`
+        source_detail = {"export_dir": str(export_dir.resolve())}
     checkpoint_path = Path(args.checkpoint)
 
     try:
         if args.mode == "backfill":
-            asyncio.run(run_backfill(source, checkpoint_path, args.recreate))
+            asyncio.run(run_backfill(source, checkpoint_path, args.recreate,
+                                     args.source, source_detail))
         elif args.mode == "incremental":
             asyncio.run(run_incremental(source, checkpoint_path))
         else:
