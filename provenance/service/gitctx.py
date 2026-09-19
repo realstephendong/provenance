@@ -33,6 +33,19 @@ def _git(repo_root: str, *args: str) -> str:
     return result.stdout
 
 
+def _is_ancestor(repo_root: str, sha: str, rev: str) -> bool:
+    """Is `sha` reachable from `rev`? The exit status *is* the answer, so this cannot
+    go through `_git`, which raises on a non-zero status."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", repo_root, "merge-base", "--is-ancestor", sha, rev],
+            capture_output=True, text=True, timeout=_TIMEOUT,
+        )
+    except Exception:
+        return False
+    return result.returncode == 0
+
+
 def _parse_porcelain(output: str) -> tuple[Counter, dict[str, dict]]:
     """-> (lines-per-sha, {sha: {"author": str, "author_time": float}})."""
     counts: Counter = Counter()
@@ -63,7 +76,7 @@ def sha_to_pr(repo_root: str, sha: str) -> int | None:
     """Resolve a commit to its pull request.
 
     Three strategies, in order: the squash-merge subject convention (`... (#4821)`),
-    then merge-commit ancestry (`Merge pull request #4821 ...`), then the GitHub
+    then merge-commit parentage (`Merge pull request #4821 ...`), then the GitHub
     adapter's own sha->PR index. The first two read only local git, so they work with
     no network and no credentials; the third catches the case both conventions miss --
     a rebase-merged commit, whose subject keeps no PR marker and which no merge commit
@@ -78,6 +91,13 @@ def sha_to_pr(repo_root: str, sha: str) -> int | None:
     if match:
         return int(match.group(1))
 
+    # A merge commit belongs to its own pull request. Blame attributes a line to a
+    # merge only when that line came from conflict resolution, which is rare -- but
+    # the walk below starts at `sha..HEAD` and so can never find the commit itself.
+    own = _MERGE_SUBJECT.search(subject)
+    if own:
+        return int(own.group(1))
+
     try:
         ancestry = _git(
             repo_root, "log", "--merges", "--ancestry-path", "--reverse",
@@ -86,8 +106,20 @@ def sha_to_pr(repo_root: str, sha: str) -> int | None:
     except Exception:
         ancestry = ""
     for line in ancestry.splitlines():
-        match = _MERGE_SUBJECT.search(line)
-        if match:
+        merge_sha, _, subject = line.partition(" ")
+        match = _MERGE_SUBJECT.search(subject)
+        if not match:
+            continue
+        # Descending from a merge is not the same as having arrived through it. A
+        # commit belongs to this PR only if it came in *on the merged branch*:
+        # reachable from the merge's second parent, and not already reachable from
+        # its first. Testing ancestry alone attributes every commit that predates the
+        # first PR to whichever PR merged next -- so in a repo that opens with one
+        # large initial commit, most of the codebase is credited to PR #1, and each
+        # of those files then exact-matches any thread discussing it. An exact hit
+        # cannot be filtered downstream, which is what makes this worth a subprocess.
+        if (_is_ancestor(repo_root, sha, f"{merge_sha}^2")
+                and not _is_ancestor(repo_root, sha, f"{merge_sha}^1")):
             return int(match.group(1))
 
     # Last resort: ask the forge. Never raises past here -- the adapter returns None
