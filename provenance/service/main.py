@@ -102,6 +102,12 @@ def ingest_status() -> dict:
         **sync.coverage(_checkpoint_path()),
         "source": "export" if config.USE_MOCK_DATA else "slack",
         "running": _ingest_lock.locked(),
+        # What ingest is *scoped* to, which is not the same as what it has indexed.
+        # A channel list narrower than the workspace is the one failure this whole
+        # feature had no way to show: backfill reported success having looked at one
+        # channel of fourteen. `*` resolves at ingest time, so the count is unknown
+        # here and the panel says so rather than guessing.
+        "scope": "*" if config.SLACK_DISCOVER_CHANNELS else len(config.SLACK_CHANNEL_IDS),
     }
     try:
         es = es_client()
@@ -143,16 +149,11 @@ async def ingest_sync() -> dict:
         # person pressing a button in a panel has no way to see that happen, so it is
         # refused rather than reported (the same stance as `retrieve.check_embedder`).
         intended = "export" if config.USE_MOCK_DATA else "slack"
-        try:
-            stamped = load.read_source(es_client())
-        except Exception:
-            stamped = None
-        if stamped and stamped.get("source") not in (None, intended):
+        conflict = sync.corpus_conflict(es_client(), intended)
+        if conflict:
             raise HTTPException(status_code=409, detail=(
-                f"this index was built from {stamped['source']!r}, but USE_MOCK_DATA="
-                f"{str(config.USE_MOCK_DATA).lower()} means a sync would read "
-                f"{intended!r} into it. Rebuild the index from the source you want "
-                f"(`make ingest` or `make ingest-slack`), or flip USE_MOCK_DATA."
+                f"{conflict} (USE_MOCK_DATA={str(config.USE_MOCK_DATA).lower()} "
+                f"selects {intended!r}.)"
             ))
 
         log: list[str] = []

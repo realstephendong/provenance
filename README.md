@@ -328,6 +328,18 @@ python -m provenance.ingest --source slack --mode reconcile        # edits/delet
 `slack-check` tells you which of these is wrong: no token, a bad or revoked token, a token
 for the wrong workspace, a private channel you are not a member of, or a missing scope.
 
+**Which channels.** `SLACK_CHANNEL_IDS=*` indexes every non-archived channel the token
+can read, resolved on each run, and is the default in `.env.example`. A pasted list is
+the one configuration mistake nothing else catches: ingest reads the channels it was
+given, indexes them correctly, and reports success — while a workspace that has grown
+to fourteen channels gets one of them indexed, and the only symptom is a timeline with
+no Slack in it. Under `*` a channel the token cannot read is skipped rather than fatal;
+under an explicit list it is an error, because a person named it. The panel's bottom
+bar shows the scope beside the coverage for the same reason.
+
+Set `SLACK_CHANNEL_TIERS` alongside it — `eng-incidents:1,social:3` — or every channel
+weighs the same and a watercooler thread ranks with an incident review.
+
 **Keeping it in sync.** `incremental` re-reads the last few days and threads whose parent is
 newer than `SLACK_THREAD_LOOKBACK_DAYS` (default 14). A reply to an older thread, an edit,
 a deletion, or a channel newly added to `SLACK_CHANNEL_IDS` is picked up by `reconcile`.

@@ -120,6 +120,8 @@ export interface IngestStatus {
   running: boolean;
   docs?: number;
   error?: string;
+  /** `'*'` = every channel the token can read; a number = that many named channels. */
+  scope?: string | number;
 }
 
 /** `POST /ingest/sync` -- what one press of Backfill actually did. */

@@ -347,6 +347,32 @@ def default_source(say: Say = print) -> Source:
     return slack_source(say)
 
 
+def corpus_conflict(es, intended_label: str) -> str | None:
+    """Why `intended_label` must not be read into this index, or None if it may be.
+
+    Nothing *collides* when two corpora share an index -- ids are per-conversation, so
+    the seed fixture and a real workspace simply both end up in there, answering
+    queries together while the source stamp and /health still name one of them. That
+    is worse than a collision, because nothing reports it. Learned the hard way: a
+    stray `--source export` run against a live index put nine seed threads into a real
+    workspace's evidence, and the only clue was a channel count that had grown.
+
+    A `backfill --recreate` is exempt -- dropping the index is an explicit request to
+    replace the corpus, which is the supported way to switch.
+    """
+    try:
+        stamped = load.read_source(es)
+    except Exception:
+        return None                      # unreachable index is not this check's business
+    if not stamped or stamped.get("source") in (None, intended_label):
+        return None
+    return (
+        f"this index was built from {stamped['source']!r}, but this run would read "
+        f"{intended_label!r} into it. Rebuild from the source you want "
+        f"(`make ingest` or `make ingest-slack`), or pass --recreate to replace it."
+    )
+
+
 def coverage(checkpoint_path: Path) -> dict:
     """What the last sync covered: per channel, and the oldest of those.
 

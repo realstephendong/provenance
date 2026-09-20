@@ -73,6 +73,15 @@ def main() -> None:
     source = _source(args)
     checkpoint_path = Path(args.checkpoint)
 
+    # Reading one corpus into an index built from the other is silent, not loud: see
+    # `sync.corpus_conflict`. `--recreate` is the supported way to switch.
+    if not (args.mode == "backfill" and args.recreate):
+        from . import load
+        conflict = sync.corpus_conflict(load.client(), source.label)
+        if conflict:
+            source.close()
+            sys.exit(conflict)
+
     try:
         if args.mode == "backfill":
             asyncio.run(sync.run_backfill(source.load, checkpoint_path, args.recreate,

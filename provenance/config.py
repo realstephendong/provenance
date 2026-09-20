@@ -253,11 +253,16 @@ SLACK_WORKSPACE = os.environ.get("SLACK_WORKSPACE", "acme")
 SLACK_API = os.environ.get("SLACK_API", "https://slack.com/api").rstrip("/")
 SLACK_USER_TOKEN = os.environ.get("SLACK_USER_TOKEN", "").strip()
 SLACK_TEAM_ID = os.environ.get("SLACK_TEAM_ID", "T0C34UQUW68").strip()
+# Which channels batch ingest reads. `*` means every non-archived channel the token
+# can see, resolved at ingest time -- the same wildcard SLACK_BOT_CHANNEL_IDS takes.
+# Prefer it to a pasted list: a workspace grows channels, and a list silently keeps
+# indexing the subset it was written for while reporting nothing wrong.
 SLACK_CHANNEL_IDS = [
     c.strip()
     for c in os.environ.get("SLACK_CHANNEL_IDS", "C0C34DY037B").split(",")
     if c.strip()
 ]
+SLACK_DISCOVER_CHANNELS = "*" in SLACK_CHANNEL_IDS
 SLACK_CHANNEL_TIER = int(os.environ.get("SLACK_CHANNEL_TIER", "2"))
 # Per-channel override: "eng-incidents:1,eng-payments:1,social:3". A live workspace
 # has the same spread of signal and noise the seed corpus encoded in

@@ -86,7 +86,10 @@ def load_slack(client: SlackClient, report: AccessReport, oldest: float = 0.0) -
     apply_workspace(report.workspace_url)
 
     out: list[Message] = []
-    for channel in report.channels:
+    # Only the readable ones: with SLACK_CHANNEL_IDS=* the report can carry channels
+    # the token cannot open, and `check_access` deliberately treats those as skipped
+    # rather than fatal.
+    for channel in [c for c in report.channels if c.ok]:
         raw = _fetch_channel(client, channel.channel_id, oldest)
         names = resolve_names(client, raw)
         kept = [

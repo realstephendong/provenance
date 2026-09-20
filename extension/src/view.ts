@@ -477,13 +477,28 @@ function formatTs(ts: number): string {
   });
 }
 
+/**
+ * The scope suffix: how many channels ingest is pointed at.
+ *
+ * Worth the pixels because a narrow `SLACK_CHANNEL_IDS` is invisible otherwise --
+ * backfill happily reports success having read one channel of fourteen, and the only
+ * symptom is a graph with no Slack in it.
+ */
+function scopeNote(scope: string | number | undefined): string {
+  if (scope === undefined) { return ''; }
+  if (scope === '*') { return ' · all channels'; }
+  const count = Number(scope);
+  return Number.isFinite(count) ? ` · ${plural(count, 'channel')}` : '';
+}
+
 function coverageNote(status: IngestStatus): string {
+  const scope = scopeNote(status.scope);
   if (status.never_run) {
-    return 'Nothing indexed yet · Backfill reads the whole history';
+    return `Nothing indexed yet · Backfill reads the whole history${scope}`;
   }
   if (status.covered_through === null) { return ''; }
   const docs = status.docs === undefined ? '' : ` · ${plural(status.docs, 'conversation')}`;
-  return `Indexed through ${formatTs(status.covered_through)}${docs}`;
+  return `Indexed through ${formatTs(status.covered_through)}${docs}${scope}`;
 }
 
 /**
@@ -863,15 +878,28 @@ const STYLES = `
   .graph-svg .stub { stroke: var(--vscode-foreground); stroke-opacity: 0.3; stroke-width: 1.4; }
   .graph-svg .dot { stroke: var(--vscode-editor-background); stroke-width: 2; }
 
-  .graph-svg .node rect { fill: var(--vscode-editorWidget-background);
+  .graph-svg .node .card { fill: var(--vscode-editorWidget-background);
                           stroke: var(--vscode-panel-border); stroke-width: 1.2; }
   .graph-svg .node .accent { opacity: 0.95; stroke: none; }
   .graph-svg .node { cursor: pointer; transition: opacity 120ms ease; }
-  .graph-svg .node:hover rect:not(.accent), .graph-svg .node:focus rect:not(.accent),
-  .graph-svg .node.active rect:not(.accent) { stroke: var(--vscode-focusBorder); stroke-width: 2; }
+  .graph-svg .node:hover .card, .graph-svg .node:focus .card,
+  .graph-svg .node.active .card { stroke: var(--vscode-focusBorder); stroke-width: 2; }
   .graph-svg .node.dimmed, .graph-svg .chip-node.dimmed { opacity: 0.25; }
-  .graph-svg .node.selected rect:not(.accent) { stroke: var(--vscode-textLink-foreground); stroke-width: 2.5; }
+  .graph-svg .node.selected .card { stroke: var(--vscode-textLink-foreground); stroke-width: 2.5; }
   .graph-svg .node.linkable:hover .node-label { text-decoration: underline; }
+
+  /* The card's hover action. Hidden at rest, so a column of cards stays quiet and
+     the corner is not another thing to read; shown for the card under the pointer,
+     the focused card, and the active one -- a :hover-only rule would put it out of
+     reach of the keyboard. */
+  .graph-svg .node-open { opacity: 0; transition: opacity 120ms ease; }
+  .graph-svg .node:hover .node-open, .graph-svg .node:focus .node-open,
+  .graph-svg .node.active .node-open, .graph-svg .node.selected .node-open { opacity: 1; }
+  .graph-svg .node-open rect { fill: var(--vscode-button-secondaryBackground, #3a3d41); stroke: none; }
+  .graph-svg .node-open text { font-size: 9px; font-weight: 600; text-anchor: middle;
+                               fill: var(--vscode-button-secondaryForeground, #cccccc); }
+  .graph-svg .node-open:hover rect { fill: var(--vscode-button-background, #0078d4); }
+  .graph-svg .node-open:hover text { fill: var(--vscode-button-foreground, #ffffff); }
 
   .graph-svg .n-code .accent, .graph-svg .n-code .node-glyph, .graph-svg circle.n-code { fill: var(--vscode-charts-blue, #4a9eff); }
   .graph-svg .n-commit .accent, .graph-svg .n-commit .node-glyph, .graph-svg circle.n-commit { fill: var(--vscode-charts-yellow, #cca700); }
@@ -882,15 +910,15 @@ const STYLES = `
   .graph-svg .n-person .accent, .graph-svg .n-person .node-glyph, .graph-svg circle.n-person { fill: var(--vscode-descriptionForeground); }
 
   .graph-svg .node-icon { font-size: 13px; }
-  /* The mark is scaled into place by a transform, so it must not also be stroked. */
+  /* The mark is scaled into place by a transform, so it must not also be stroked.
+     Subpaths that carry their own brand colour set it as a fill attribute on the
+     path, which outranks the accent colour they would otherwise inherit here. */
   .graph-svg .node-glyph { stroke: none; }
   .graph-svg .node-type { font-size: 8.5px; fill: var(--vscode-foreground); opacity: 0.55;
                           text-transform: uppercase; letter-spacing: 0.06em; }
   .graph-svg .node-date { font-size: 8.5px; fill: var(--vscode-foreground); opacity: 0.5;
                           text-anchor: end; font-family: var(--vscode-editor-font-family); }
   .graph-svg .node-label { font-size: 12px; fill: var(--vscode-foreground); font-weight: 600; }
-  .graph-svg .node-cite { font-size: 9.5px; font-weight: 700; text-anchor: end;
-                          fill: var(--vscode-textLink-foreground); }
   .graph-svg .node-subtitle { font-size: 9.5px; fill: var(--vscode-foreground); opacity: 0.6; }
 
   /* People and tickets ride inside their event's card, not as loose boxes. */
@@ -949,7 +977,7 @@ const STYLES = `
   .graph-legend { display: flex; flex-wrap: wrap; gap: 5px 9px; margin-top: 8px; }
   .legend-chip { font-size: 0.68rem; opacity: 0.8; display: inline-flex; align-items: center; gap: 4px;
                 border-left: 3px solid transparent; padding-left: 5px; }
-  .legend-glyph { width: 10px; height: 10px; flex: none; fill: currentColor; }
+  .legend-glyph { width: 13px; height: 13px; flex: none; fill: currentColor; }
   .legend-chip.n-code { border-color: var(--vscode-charts-blue, #4a9eff); }
   .legend-chip.n-commit { border-color: var(--vscode-charts-yellow, #cca700); }
   .legend-chip.n-pr { border-color: var(--vscode-charts-green, #89d185); }
@@ -1256,6 +1284,27 @@ const CLIENT_SCRIPT = `
       if (citation) { focusEvidence(citation); }
     }
 
+    // The hover action, as opposed to the card body: take me to the thing itself.
+    // A permalink wins -- the thread in Slack, where the conversation actually is.
+    // Failing that, the evidence card this node is cited as, which is the nearest
+    // thing the panel holds. Failing that, the detail drawer, which is all there is.
+    function openNode(el) {
+      const node = parseNode(el);
+      if (!node) { return; }
+      const data = node.data || {};
+      if (typeof data.permalink === 'string' && data.permalink) {
+        vscodeApi.postMessage({ type: 'openLink', url: data.permalink });
+        renderDetails(node);
+        return;
+      }
+      const citation = el.getAttribute('data-citation');
+      if (citation && focusEvidence(citation)) {
+        renderDetails(node);
+        return;
+      }
+      activate(el);
+    }
+
     function wire(el) {
       // Satellite edges (AUTHORED_BY, TRACKED_BY) are folded into the card and so draw
       // no arc of their own -- tracing a chip by its own id would dim the whole graph.
@@ -1269,12 +1318,21 @@ const CLIENT_SCRIPT = `
       el.addEventListener('blur', function () { setTrace(null); });
       el.addEventListener('click', function (event) {
         event.stopPropagation();
+        if (event.target instanceof Element && event.target.closest('.node-open')) {
+          openNode(el);
+          return;
+        }
         activate(el);
       });
       el.addEventListener('keydown', function (event) {
         if (event.key === 'Enter' || event.key === ' ') {
           event.preventDefault();
           activate(el);
+        }
+        // The action the hover button performs, without a pointer.
+        if (event.key === 'o' || event.key === 'O') {
+          event.preventDefault();
+          openNode(el);
         }
       });
     }
