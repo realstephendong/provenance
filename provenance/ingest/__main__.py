@@ -28,13 +28,20 @@ from pathlib import Path
 from .. import config
 from . import checkpoint as checkpoint_store
 from . import load, pipeline, slack_check, slack_live
-from .segment import Unit, group_by_channel, segment
+from .segment import Unit, gap_report, gap_report_lines, group_by_channel, segment
 from .slack_client import SlackClient, SlackError
 from .slack_source import Message, load_export
 
 # A message source: `oldest` (unix ts) -> messages. The export reader ignores `oldest`
 # and always returns everything; the live reader uses it to bound the API calls.
 Loader = Callable[[float], list[Message]]
+
+
+def report_gaps(messages: list[Message]) -> None:
+    """Say so when a channel's loose messages are packed too tightly for rule 2's
+    gap threshold to separate anything. Silent when there is nothing to report."""
+    for line in gap_report_lines(gap_report(messages)):
+        print(line)
 
 
 async def process_units(es, units: list[Unit]) -> int:
@@ -64,6 +71,7 @@ async def run_backfill(source: Loader, checkpoint_path: Path, recreate: bool,
     es = load.client()
     load.ensure_index(es, recreate=recreate)
 
+    report_gaps(messages)
     units = segment(messages)
     print(f"backfill: {len(messages)} messages -> {len(units)} units")
     await process_units(es, units)
@@ -145,8 +153,13 @@ def affected_messages(all_messages: list[Message], new_messages: list[Message]) 
         affected.extend(
             m for m in pool if m.thread_ts is not None and m.thread_ts in affected_thread_ts
         )
-        loose_pool = [m for m in pool if m.thread_ts is None]
         loose_seeds = [m for m in channel_new if m.thread_ts is None]
+        if not config.SEGMENT_TRUST_TIME:
+            # No bursts exist to continue: `segment` gives every loose message its own
+            # unit, so a new one affects itself and nothing around it.
+            affected.extend(loose_seeds)
+            continue
+        loose_pool = [m for m in pool if m.thread_ts is None]
         affected.extend(_burst_reachable(loose_pool, loose_seeds, config.SEGMENT_GAP_SECONDS))
     return _dedupe_by_identity(affected)
 
@@ -182,6 +195,7 @@ async def run_incremental(source: Loader, checkpoint_path: Path) -> None:
         return
     print(f"incremental: {len(new_messages)} new messages")
 
+    report_gaps(all_messages)
     affected = affected_messages(all_messages, new_messages)
     units = segment(affected)
     print(f"  {len(affected)} affected messages -> {len(units)} units to rebuild")
@@ -210,6 +224,7 @@ async def run_reconcile(source: Loader) -> None:
     load.ensure_index(es)
 
     all_messages = source(0.0)
+    report_gaps(all_messages)
     units = segment(all_messages)
     current_by_id = {
         load.point_id(u.channel_id, u.thread_id): load.content_hash(u.raw_text) for u in units
