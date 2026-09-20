@@ -96,7 +96,7 @@ class LocalIngest:
         conversations can the person at this keyboard see.
         """
         report = slack_check.check_access(
-            self.client(), config.SLACK_TEAM_ID, ["*"], say=say
+            self.client(), config.SLACK_TEAM_ID, ["*"], say=say, private=True
         )
         if not report.ok:
             raise NotIndexable("\n".join(slack_check.verdict_lines(report)))
