@@ -108,7 +108,7 @@ do_ingest() {
     make ingest
   else
     bold "indexing live Slack (USE_MOCK_DATA=false)"
-    [ -n "$(env_get SLACK_USER_TOKEN)" ] || die "live ingest needs SLACK_USER_TOKEN in .env"
+    [ -n "$(env_get SLACK_BOT_TOKEN)" ] || die "live ingest needs SLACK_BOT_TOKEN in .env"
     make ingest-slack
   fi
 }
@@ -123,7 +123,7 @@ do_serve() {
 do_bot() {
   # The bot's own preflight is thorough; these two checks just fail faster and name
   # the file to edit. slack_bolt is imported lazily, so a stale venv surfaces here.
-  for v in SLACK_USER_TOKEN SLACK_BOT_TOKEN SLACK_APP_TOKEN; do
+  for v in SLACK_BOT_TOKEN SLACK_APP_TOKEN; do
     [ -n "$(env_get "$v")" ] || die "the Slack bot needs $v in .env (see README, \"The Slack bot\")"
   done
   "$PY" -c 'import slack_bolt' 2>/dev/null || { bold "installing slack_bolt"; make install; }

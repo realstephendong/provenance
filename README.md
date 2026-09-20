@@ -56,10 +56,9 @@ For the extension: `make extension`, then open `extension/` in VS Code and press
 - **`USE_MOCK_DATA` defaults to `true`**, which is what makes the quick start above
   need no credentials at all. See [Mock or real](#mock-or-real).
 - **`SENTRY_DSN` is optional.** Unset, `observability.py` no-ops every call.
-- **`SLACK_USER_TOKEN` is only needed for live Slack** — see [Connecting to Slack](#connecting-to-slack).
-  The seed demo needs no Slack account. **`SLACK_BOT_TOKEN` / `SLACK_APP_TOKEN` are
-  only needed for [the Slack bot](#the-slack-bot)**, which indexes a conversation on
-  demand from inside Slack.
+- **Live shared Slack ingest uses `SLACK_BOT_TOKEN`** and its public-channel
+  allowlist. The seed demo needs no Slack account. Browser OAuth is only for the
+  private, on-device index; it never gives the shared service your personal token.
 
 ---
 
@@ -274,49 +273,45 @@ message — that case is `--mode reconcile`'s job either way.
 
 Ingest has two sources: a static export directory (`--source export`, the seed demo
 above) and the live Slack channel (`--source slack`, next section). Both feed the same
-pipeline, and which one is the default follows `USE_MOCK_DATA`. Still **not** built: an
-OAuth login flow and an Events API webhook receiver — you paste a token, and
-`--mode incremental` / `--mode reconcile` are the sync mechanism.
+pipeline, and which one is the default follows `USE_MOCK_DATA`. Shared Slack reads use
+the installed workspace bot; browser OAuth is reserved for private local indexing.
 
 ---
 
 ## Connecting to Slack
 
-Each person indexes the channel **with their own Slack login**, into their **own local**
-Elasticsearch. So what you can index is exactly what Slack lets you see, and there is no
-shared index or service-side auth to configure. The channel is `C0C34DY037B` in workspace
-`T0C34UQUW68` (both pre-filled in `.env.example`).
-
-Slack's API does not accept a username and password, so your "login" is a **User OAuth
-Token** (`xoxp-…`). It is the only value you fill in.
+Shared backfill indexes approved **public** Slack channels into the shared Elasticsearch
+index using the workspace bot, not a developer's personal Slack credential. The bot
+allowlist is the policy boundary: only channels in `SLACK_BOT_CHANNEL_IDS` may enter
+the shared index.
 
 **One-time setup**
 
 1. In workspace `T0C34UQUW68`, go to <https://api.slack.com/apps> → **Create New App** →
    **From a manifest**, and paste [`slack_app_manifest.yml`](slack_app_manifest.yml).
-   Everything that *reads* Slack is a read-only **user** scope, so the token sees
-   exactly what you see. (The manifest also declares the bot user and the two command
-   scopes [the Slack bot](#the-slack-bot) needs; leave its tokens blank and the bot is
-   simply off.) **Keep it an internal app — never distribute it.** Since 2025-05-29 Slack limits `conversations.history` and
+   The manifest declares the bot scopes for shared ingestion. **Keep it an internal
+   app — never distribute it.** Since 2025-05-29 Slack limits `conversations.history` and
    `conversations.replies` to 1 request/minute (15 messages each) for distributed
    non-Marketplace apps, which makes a full-history backfill impractical. Internal apps
    keep the normal limits.
 2. **Install to Workspace.** If your workspace requires it, an admin has to approve the
    app first.
-3. Copy the **User OAuth Token** from *OAuth & Permissions* into `.env`:
-   `SLACK_USER_TOKEN=xoxp-...`
+3. Copy the **Bot User OAuth Token** from *OAuth & Permissions* into `.env`:
+   `SLACK_BOT_TOKEN=xoxb-...`
+4. Set `SLACK_BOT_CHANNEL_IDS` to the public channel IDs that may be shared, or `*`
+   to discover and join every public channel.
 
 **Check access, then ingest**
 
 ```bash
-make slack-check      # do I have access to the channel? prints ACCESS OK or NO ACCESS + why
+make slack-check      # can the workspace bot read the approved public channels?
 make es
 make ingest-slack     # entire channel history -> Elasticsearch (drops and rebuilds the index)
 make serve
 ```
 
-`make ingest-slack` runs the same check first and stops with the verdict if you don't have
-access, before any OpenAI spend. On Windows without `make`, run the commands directly:
+`make ingest-slack` runs the same check first and stops before any OpenAI spend if the
+bot cannot read its allowlist. On Windows without `make`, run the commands directly:
 
 ```bash
 python -m provenance.ingest.slack_check
@@ -325,33 +320,25 @@ python -m provenance.ingest --source slack --mode incremental      # later, to c
 python -m provenance.ingest --source slack --mode reconcile        # edits/deletes/old threads
 ```
 
-`slack-check` tells you which of these is wrong: no token, a bad or revoked token, a token
-for the wrong workspace, a private channel you are not a member of, or a missing scope.
+`slack-check` tells you which of these is wrong: no bot token, a bad or revoked token,
+the wrong workspace, a channel the bot cannot join, or a missing scope.
 
-**Which channels.** `SLACK_CHANNEL_IDS=*` indexes every non-archived channel the token
-can read, resolved on each run, and is the default in `.env.example`. A pasted list is
-the one configuration mistake nothing else catches: ingest reads the channels it was
-given, indexes them correctly, and reports success — while a workspace that has grown
-to fourteen channels gets one of them indexed, and the only symptom is a timeline with
-no Slack in it. Under `*` a channel the token cannot read is skipped rather than fatal;
-under an explicit list it is an error, because a person named it. The panel's bottom
-bar shows the scope beside the coverage for the same reason.
+**Which channels.** `SLACK_BOT_CHANNEL_IDS=*` discovers every public channel and joins
+it before reading. A pasted allowlist is safer when the shared retrieval audience is
+narrower than the workspace; it prevents a public channel from entering Elasticsearch
+by accident. Private channels are excluded from shared backfill even if the bot was
+invited to them.
 
 Set `SLACK_CHANNEL_TIERS` alongside it — `eng-incidents:1,social:3` — or every channel
 weighs the same and a watercooler thread ranks with an incident review.
 
 **Keeping it in sync.** `incremental` re-reads the last few days and threads whose parent is
 newer than `SLACK_THREAD_LOOKBACK_DAYS` (default 14). A reply to an older thread, an edit,
-a deletion, or a channel newly added to `SLACK_CHANNEL_IDS` is picked up by `reconcile`.
+a deletion, or a channel newly added to `SLACK_BOT_CHANNEL_IDS` is picked up by `reconcile`.
 
-**Things to know before you paste a token**
-
-- `.env` is gitignored, but this folder may live in OneDrive or another synced location,
-  which uploads it. Treat the token like a password; revoke it from the Slack app page if
-  it leaks.
-- Message text is sent to OpenAI (summaries and embeddings) and stored in your local
-  Elasticsearch, which runs with security disabled (`docker-compose.yml`). That is fine
-  for your own machine; do not point it at a shared server.
+Treat the bot token like a password. `.env` is gitignored, but it may still be synced by
+other software. Shared-ingest message text is sent to OpenAI for summarization and
+embeddings, then stored in the shared Elasticsearch index.
 
 ---
 

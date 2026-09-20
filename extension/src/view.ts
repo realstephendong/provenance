@@ -457,40 +457,46 @@ export class ProvenanceViewProvider implements vscode.WebviewViewProvider {
     const [shared, local] = await Promise.allSettled([sharedCall, localCall]);
     this.ingestBusy = false;
 
-    if (shared.status === 'rejected') {
-      const detail = shared.reason instanceof Error
-        ? shared.reason.message : String(shared.reason);
-      // The service's refusals are paragraphs -- a missing scope and how to add it, a
-      // corpus mismatch and how to resolve it. The bar is one line, so it says that it
-      // failed and the notification carries the instructions.
-      this.postStatusBar('Backfill failed', { isError: true, title: detail });
-      vscode.window.showErrorMessage(`Provenance backfill: ${detail}`);
-      return;
-    }
-
-    const result = shared.value;
-    const through = result.covered_through
+    const sharedError = shared.status === 'rejected'
+      ? (shared.reason instanceof Error ? shared.reason.message : String(shared.reason))
+      : '';
+    const result = shared.status === 'fulfilled' ? shared.value : undefined;
+    const through = result?.covered_through
       ? ` · through ${formatTs(result.covered_through)}` : '';
-    const workspaceNote = result.new_messages === 0
-      ? `Already up to date${through}`
-      : `Indexed ${plural(result.indexed, 'conversation')} from `
-        + `${plural(result.new_messages, 'new message')}${through}`;
+    const workspaceNote = result
+      ? (result.new_messages === 0
+        ? `Already up to date${through}`
+        : `Indexed ${plural(result.indexed, 'conversation')} from `
+          + `${plural(result.new_messages, 'new message')}${through}`)
+      : 'Shared backfill unavailable';
 
-    const lines = [...result.log];
+    const lines = result ? [...result.log] : [`shared backfill unavailable: ${sharedError}`];
     let privateNote = '';
     if (local.status === 'fulfilled' && local.value) {
       // Named separately, always. Folding the two counts into one number would hide
       // exactly the fact this feature exists to make visible.
       privateNote = local.value.indexed > 0
         ? ` · ${plural(local.value.indexed, 'private conversation')} on this machine`
-        : '';
+        : ' · private index up to date';
       lines.push('', 'private (this machine only):', ...local.value.log);
     } else if (local.status === 'rejected') {
       privateNote = ' · private half failed';
       lines.push('', `private half failed: ${String(local.reason)}`);
     }
 
-    this.postStatusBar(workspaceNote + privateNote, { title: lines.join('\n') });
+    const localSucceeded = local.status === 'fulfilled' && Boolean(local.value);
+    this.postStatusBar(workspaceNote + privateNote, {
+      isError: Boolean(sharedError) && !localSucceeded,
+      title: lines.join('\n'),
+    });
+    if (sharedError) {
+      const message = `Provenance shared backfill: ${sharedError}`;
+      if (localSucceeded) {
+        vscode.window.showWarningMessage(`${message} Private backfill completed.`);
+      } else {
+        vscode.window.showErrorMessage(message);
+      }
+    }
   }
 
   /** Copy the findings as markdown and append them to `.provenance/context.md` in
@@ -583,7 +589,7 @@ function formatTs(ts: number): string {
 /**
  * The scope suffix: how many channels ingest is pointed at.
  *
- * Worth the pixels because a narrow `SLACK_CHANNEL_IDS` is invisible otherwise --
+ * Worth the pixels because a narrow `SLACK_BOT_CHANNEL_IDS` is invisible otherwise --
  * backfill happily reports success having read one channel of fourteen, and the only
  * symptom is a graph with no Slack in it.
  */
