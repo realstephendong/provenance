@@ -51,6 +51,8 @@ slackbot:
 # Shared team deployment: Elasticsearch + API + workspace Slack bot.
 # Configure .env first; see README, "Deploying the shared Slack bot".
 deploy:
+	@test -f .env || (echo "missing .env: cp .env.example .env, then configure it"; exit 1)
+	@grep -Eq '^[[:space:]]*GITHUB_APP_PRIVATE_KEY_FILE[[:space:]]*=[[:space:]]*[^[:space:]#]+' .env || (echo "missing GITHUB_APP_PRIVATE_KEY_FILE in .env"; exit 1)
 	docker compose -f docker-compose.deploy.yml up -d --build
 
 deploy-logs:

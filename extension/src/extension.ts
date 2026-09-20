@@ -1,4 +1,6 @@
 import * as vscode from 'vscode';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { postCount } from './api';
 import { ProvenanceCodeLensProvider } from './codelens';
 import { Selection } from './types';
@@ -7,6 +9,56 @@ import { keyFor, ProvenanceViewProvider } from './view';
 // How long the selection must sit still before the status bar asks the backend how
 // much evidence exists. Selection changes fire on every keystroke-with-shift.
 const STATUS_DEBOUNCE_MS = 700;
+const execFileAsync = promisify(execFile);
+const repositoryCache = new Map<string, Promise<string>>();
+
+async function githubRepository(repoRoot: string): Promise<string> {
+  let pending = repositoryCache.get(repoRoot);
+  if (!pending) {
+    pending = execFileAsync('git', ['-C', repoRoot, 'remote', 'get-url', 'origin'])
+      .then(({ stdout }) => {
+        const remote = stdout.trim().replace(/\.git$/, '');
+        const match = remote.match(/(?:github\.com[/:])([^/]+\/[^/]+)$/i);
+        return match ? match[1] : '';
+      })
+      .catch(() => '');
+    repositoryCache.set(repoRoot, pending);
+  }
+  return pending;
+}
+
+async function localBlame(selection: Selection): Promise<Record<string, unknown> | undefined> {
+  if (!selection.repo_root) { return undefined; }
+  try {
+    const { stdout } = await execFileAsync('git', [
+      '-C', selection.repo_root, 'blame', '--porcelain',
+      `-L${selection.line_start},${selection.line_end}`, '--', selection.file_path,
+    ]);
+    const counts = new Map<string, { author: string; ts: number; lines: number }>();
+    let sha = ''; let author = ''; let ts = 0;
+    for (const line of stdout.split('\n')) {
+      const header = line.match(/^([0-9a-f]{40}) /);
+      if (header) { sha = header[1]; author = ''; ts = 0; continue; }
+      if (line.startsWith('author ')) { author = line.slice(7); continue; }
+      if (line.startsWith('author-time ')) { ts = Number(line.slice(12)); continue; }
+      if (line.startsWith('\t') && sha) {
+        const item = counts.get(sha) ?? { author, ts, lines: 0 };
+        item.lines += 1; counts.set(sha, item);
+      }
+    }
+    const commits = [...counts.entries()].map(([full, item]) => ({
+      sha: full.slice(0, 7), author: item.author || null,
+      date: item.ts ? new Date(item.ts * 1000).toISOString().slice(0, 10) : null,
+      ts: item.ts || null, lines: item.lines, pr_number: null, dominant: false, current: true,
+    }));
+    const dominant = commits.sort((a, b) => b.lines - a.lines)[0];
+    if (!dominant) { return undefined; }
+    dominant.dominant = true;
+    return { authors: [...new Set(commits.map(c => c.author).filter(Boolean))], dominant_sha: dominant.sha,
+      all_shas: commits.map(c => c.sha), pr_number: null, pr_numbers: [], commit_date: dominant.date,
+      commit_ts: dominant.ts, uncommitted: false, commits };
+  } catch { return undefined; }
+}
 
 function serviceUrl(): string {
   return vscode.workspace
@@ -36,7 +88,7 @@ function selectionFrom(
   };
 }
 
-function activeSelection(): Selection | undefined {
+async function activeSelection(): Promise<Selection | undefined> {
   const editor = vscode.window.activeTextEditor;
   if (!editor) {
     vscode.window.showWarningMessage('Provenance: open a file and select some code first.');
@@ -50,6 +102,10 @@ function activeSelection(): Selection | undefined {
   if (!selection) {
     vscode.window.showWarningMessage('Provenance: that selection is only whitespace.');
     return undefined;
+  }
+  if (selection.repo_root) {
+    selection.github_repo = await githubRepository(selection.repo_root);
+    selection.precomputed_blame = await localBlame(selection);
   }
   return selection;
 }
@@ -138,7 +194,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
 
     vscode.commands.registerCommand('provenance.explain', async () => {
-      const selection = activeSelection();
+      const selection = await activeSelection();
       if (selection) { await view.explain(selection); }
     }),
 
@@ -148,7 +204,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
 
     vscode.commands.registerCommand('provenance.refresh', async () => {
-      const selection = activeSelection();
+      const selection = await activeSelection();
       if (selection) { await view.explain(selection, true); }
     }),
 

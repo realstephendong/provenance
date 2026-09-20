@@ -333,11 +333,11 @@ Set these values in `.env` before the first launch:
 ```bash
 OPENAI_API_KEY=...
 USE_MOCK_DATA=false
+GITHUB_APP_ID=5006027
+GITHUB_APP_PRIVATE_KEY_FILE=/secure/path/provenance.private-key.pem
 SLACK_BOT_TOKEN=xoxb-...
 SLACK_APP_TOKEN=xapp-...
 SLACK_BOT_CHANNEL_IDS=C0123ABC,C0456DEF
-GITHUB_TOKEN=...
-GITHUB_REPO=your-org/your-repo
 ```
 
 `make deploy` starts a persistent shared Elasticsearch index, the Provenance API, and
@@ -345,10 +345,13 @@ the Socket Mode bot. Check it with `make deploy-logs`; stop it with `make deploy
 (the indexed data remains in Docker's named volume). This command is safe to run again
 after changing `.env` or code; Docker rebuilds/restarts the affected services.
 
-`USE_MOCK_DATA=false` is required for a real team deployment. The API then requires
-the GitHub token and repository shown above; otherwise it refuses to start instead of
-mixing live Slack conversations with demo PR metadata. If you only want to smoke-test
-the container setup, leave the default `USE_MOCK_DATA=true` temporarily.
+`USE_MOCK_DATA=false` is required for a real team deployment. The API uses the GitHub
+App's short-lived installation token for the repository detected by the extension;
+the private key is mounted read-only and is never sent to a developer's machine. An
+installation must exist for each private repository you want to analyze. The legacy
+`GITHUB_TOKEN` / `GITHUB_REPO` variables still work for a single fixed repository.
+If you only want to smoke-test the container setup, leave the default
+`USE_MOCK_DATA=true` temporarily.
 
 To enable all public Slack channels instead, set `SLACK_BOT_CHANNEL_IDS=*` and run
 `make deploy` after updating the app manifest/reinstalling it. This grants broad

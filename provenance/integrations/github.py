@@ -12,11 +12,37 @@ than a real repository's PR silently answered with a seed fixture's title.
 from __future__ import annotations
 
 import json
+import time
+from contextvars import ContextVar, Token
+from pathlib import Path
+
+import httpx
+import jwt
 
 from .. import config
 from . import _live
 
 _CACHE: list[dict] | None = None
+_repository: ContextVar[str] = ContextVar("github_repository", default="")
+_app_tokens: dict[str, tuple[float, str]] = {}
+
+
+def set_repository(repository: str) -> Token:
+    """Bind this request to an `owner/repo` without global cross-request state."""
+    return _repository.set(repository.strip().strip("/"))
+
+
+def reset_repository(token: Token) -> None:
+    _repository.reset(token)
+
+
+def _repo() -> str:
+    return _repository.get() or config.GITHUB_REPO
+
+
+def pull_request_url(pr_number: int) -> str | None:
+    repository = _repo()
+    return f"{config.GITHUB_WEB_URL}/{repository}/pull/{pr_number}" if repository else None
 
 
 def _load() -> list[dict]:
@@ -33,14 +59,63 @@ def _load() -> list[dict]:
 # --- live backend -------------------------------------------------------------
 
 def live_enabled() -> bool:
-    return bool(config.GITHUB_TOKEN and config.GITHUB_REPO)
+    return bool(
+        (config.GITHUB_TOKEN and config.GITHUB_REPO)
+        or (config.GITHUB_APP_ID and config.GITHUB_APP_PRIVATE_KEY_PATH)
+    )
 
 
-def _headers() -> dict:
+def _headers(repository: str) -> dict:
+    if config.GITHUB_APP_ID and config.GITHUB_APP_PRIVATE_KEY_PATH:
+        token = _installation_token(repository)
+        if token:
+            return {
+                "Authorization": f"Bearer {token}",
+                "X-GitHub-Api-Version": "2022-11-28",
+            }
     return {
         "Authorization": f"Bearer {config.GITHUB_TOKEN}",
         "X-GitHub-Api-Version": "2022-11-28",
     }
+
+
+def _app_jwt() -> str | None:
+    """Short-lived JWT used only to exchange for an installation token."""
+    try:
+        key = Path(config.GITHUB_APP_PRIVATE_KEY_PATH).read_text()
+        now = int(time.time())
+        return jwt.encode({"iat": now - 60, "exp": now + 540, "iss": config.GITHUB_APP_ID}, key, algorithm="RS256")
+    except (OSError, ValueError, jwt.PyJWTError):
+        return None
+
+
+def _installation_token(repository: str) -> str | None:
+    if not repository or "/" not in repository:
+        return None
+    cached = _app_tokens.get(repository)
+    if cached and cached[0] > time.monotonic() + 60:
+        return cached[1]
+    app_jwt = _app_jwt()
+    if not app_jwt:
+        return None
+    headers = {"Accept": "application/vnd.github+json", "Authorization": f"Bearer {app_jwt}", "X-GitHub-Api-Version": "2022-11-28"}
+    try:
+        installation = httpx.get(f"{config.GITHUB_API}/repos/{repository}/installation", headers=headers, timeout=config.INTEGRATION_TIMEOUT_SECONDS)
+        if installation.status_code >= 400:
+            return None
+        installation_id = installation.json().get("id")
+        minted = httpx.post(f"{config.GITHUB_API}/app/installations/{installation_id}/access_tokens", headers=headers, timeout=config.INTEGRATION_TIMEOUT_SECONDS)
+        if minted.status_code >= 400:
+            return None
+        token = minted.json().get("token")
+        if not isinstance(token, str) or not token:
+            return None
+    except (httpx.HTTPError, ValueError, TypeError):
+        return None
+    # Installation tokens last one hour. Cache conservatively; the next request
+    # simply mints another if GitHub expires it sooner.
+    _app_tokens[repository] = (time.monotonic() + 50 * 60, token)
+    return token
 
 
 def _normalize(pr: dict) -> dict:
@@ -68,9 +143,12 @@ def _normalize(pr: dict) -> dict:
 
 
 def _live_by_pr(pr_number: int) -> dict | None:
+    repository = _repo()
+    if not repository:
+        return None
     data = _live.get_json(
-        f"{config.GITHUB_API}/repos/{config.GITHUB_REPO}/pulls/{pr_number}",
-        headers=_headers(),
+        f"{config.GITHUB_API}/repos/{repository}/pulls/{pr_number}",
+        headers=_headers(repository),
     )
     return _normalize(data) if isinstance(data, dict) else None
 
@@ -78,9 +156,12 @@ def _live_by_pr(pr_number: int) -> dict | None:
 def _live_by_sha(sha: str) -> dict | None:
     # This is an exact join, not a guess: GitHub itself knows which PRs contain a
     # given commit. It is also the only one of the three trackers that does.
+    repository = _repo()
+    if not repository:
+        return None
     data = _live.get_json(
-        f"{config.GITHUB_API}/repos/{config.GITHUB_REPO}/commits/{sha}/pulls",
-        headers=_headers(),
+        f"{config.GITHUB_API}/repos/{repository}/commits/{sha}/pulls",
+        headers=_headers(repository),
     )
     if isinstance(data, list) and data:
         merged = [pr for pr in data if pr.get("merged_at")]
