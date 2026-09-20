@@ -743,15 +743,17 @@ const STYLES = `
   .graph-svg .node.selected rect:not(.accent) { stroke: var(--vscode-textLink-foreground); stroke-width: 2.5; }
   .graph-svg .node.linkable:hover .node-label { text-decoration: underline; }
 
-  .graph-svg .n-code .accent, .graph-svg circle.n-code { fill: var(--vscode-charts-blue, #4a9eff); }
-  .graph-svg .n-commit .accent, .graph-svg circle.n-commit { fill: var(--vscode-charts-yellow, #cca700); }
-  .graph-svg .n-pr .accent, .graph-svg circle.n-pr { fill: var(--vscode-charts-green, #89d185); }
-  .graph-svg .n-slack .accent, .graph-svg circle.n-slack { fill: var(--vscode-charts-purple, #b180d7); }
-  .graph-svg .n-ticket .accent, .graph-svg circle.n-ticket { fill: var(--vscode-charts-orange, #d18616); }
-  .graph-svg .n-sentry .accent, .graph-svg circle.n-sentry { fill: var(--vscode-charts-red, #f14c4c); }
-  .graph-svg .n-person .accent, .graph-svg circle.n-person { fill: var(--vscode-descriptionForeground); }
+  .graph-svg .n-code .accent, .graph-svg .n-code .node-glyph, .graph-svg circle.n-code { fill: var(--vscode-charts-blue, #4a9eff); }
+  .graph-svg .n-commit .accent, .graph-svg .n-commit .node-glyph, .graph-svg circle.n-commit { fill: var(--vscode-charts-yellow, #cca700); }
+  .graph-svg .n-pr .accent, .graph-svg .n-pr .node-glyph, .graph-svg circle.n-pr { fill: var(--vscode-charts-green, #89d185); }
+  .graph-svg .n-slack .accent, .graph-svg .n-slack .node-glyph, .graph-svg circle.n-slack { fill: var(--vscode-charts-purple, #b180d7); }
+  .graph-svg .n-ticket .accent, .graph-svg .n-ticket .node-glyph, .graph-svg circle.n-ticket { fill: var(--vscode-charts-orange, #d18616); }
+  .graph-svg .n-sentry .accent, .graph-svg .n-sentry .node-glyph, .graph-svg circle.n-sentry { fill: var(--vscode-charts-red, #f14c4c); }
+  .graph-svg .n-person .accent, .graph-svg .n-person .node-glyph, .graph-svg circle.n-person { fill: var(--vscode-descriptionForeground); }
 
   .graph-svg .node-icon { font-size: 13px; }
+  /* The mark is scaled into place by a transform, so it must not also be stroked. */
+  .graph-svg .node-glyph { stroke: none; }
   .graph-svg .node-type { font-size: 8.5px; fill: var(--vscode-foreground); opacity: 0.55;
                           text-transform: uppercase; letter-spacing: 0.06em; }
   .graph-svg .node-date { font-size: 8.5px; fill: var(--vscode-foreground); opacity: 0.5;
@@ -817,6 +819,7 @@ const STYLES = `
   .graph-legend { display: flex; flex-wrap: wrap; gap: 5px 9px; margin-top: 8px; }
   .legend-chip { font-size: 0.68rem; opacity: 0.8; display: inline-flex; align-items: center; gap: 4px;
                 border-left: 3px solid transparent; padding-left: 5px; }
+  .legend-glyph { width: 10px; height: 10px; flex: none; fill: currentColor; }
   .legend-chip.n-code { border-color: var(--vscode-charts-blue, #4a9eff); }
   .legend-chip.n-commit { border-color: var(--vscode-charts-yellow, #cca700); }
   .legend-chip.n-pr { border-color: var(--vscode-charts-green, #89d185); }
