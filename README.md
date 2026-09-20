@@ -198,6 +198,38 @@ hash, reprocesses the first two, and deletes the third.
 Each mode reads its source **before** it writes, deletes or checkpoints anything, so a
 failed read (a Slack outage, a rate limit) leaves the index as it was.
 
+### The Backfill button
+
+The Provenance panel has a **Backfill** button in the bar along its bottom edge, with
+a line to its left saying how far the index is caught up. It runs `--mode incremental`
+against the same `.provenance/ingest_checkpoint.json` the CLI uses, so a sync started
+from the panel and one started from a terminal share one notion of what is already
+indexed and neither re-pays for the other's work.
+
+The window is the checkpoint's, not the clock's. Each press indexes messages newer
+than the recorded per-channel timestamp, and records the new one when it finishes —
+press it twice and the second press says *Already up to date*. With no checkpoint at
+all every message is new, so the first press is a full backfill and every press after
+it is the delta; there is no separate first-run path.
+
+The bar shows the **oldest** channel's timestamp, since that is the point the whole
+index is genuinely caught up to. Which channel is lagging is in the tooltip.
+
+Two endpoints back it, both usable directly:
+
+```bash
+curl localhost:8000/ingest/status        # coverage; reads the checkpoint, never Slack
+curl -XPOST localhost:8000/ingest/sync   # index what is new
+```
+
+`/ingest/sync` refuses rather than guesses in three cases: a sync is already running
+(409), the token cannot read the channels (503, with the same verdict `make
+slack-check` prints), or the index was built from a different corpus than
+`USE_MOCK_DATA` currently selects (409). The last one matters — without it, pressing
+Backfill on a seed-built index with `USE_MOCK_DATA=false` would quietly read a live
+workspace in alongside the demo corpus, and `/health` would still name only one of
+them.
+
 ### When timestamps don't mean anything
 
 Segmentation groups threads by `thread_ts`, which is exact. Everything else — loose
@@ -544,7 +576,7 @@ provenance/
   llm.py             the only module that calls OpenAI
   observability.py   Sentry, no-op when unconfigured
   integrations/      GitHub / tickets / incidents: fixtures or live, one adapter each
-  ingest/            Slack -> Elasticsearch, three batch modes
+  ingest/            Slack -> Elasticsearch: sync.py is the library, three modes
   slackbot/          the on-demand bot: one conversation, indexed from Slack
   service/           the live /context pipeline
   mcp_server/        MCP stdio server

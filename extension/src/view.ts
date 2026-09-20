@@ -1,8 +1,8 @@
 import { createHash } from 'crypto';
 import * as vscode from 'vscode';
-import { postContext } from './api';
+import { getIngestStatus, postContext, postIngestSync } from './api';
 import { renderGraph } from './graph';
-import { ContextResponse, Result, Selection } from './types';
+import { ContextResponse, IngestStatus, Result, Selection } from './types';
 
 // The stage list is indicative, not observed: /context is a single blocking call with
 // no progress channel, so this rotates on a timer. Real per-stage numbers arrive with
@@ -64,6 +64,9 @@ export class ProvenanceViewProvider implements vscode.WebviewViewProvider {
   private loadingTimer: NodeJS.Timeout | undefined;
   private readyWaiters: (() => void)[] = [];
 
+  /** A sync is one-at-a-time in the service too; this keeps the panel from asking. */
+  private ingestBusy = false;
+
   private history: Entry[] = [];
   private activeKey: string | undefined;
   private lastFailure: Selection | undefined;
@@ -103,6 +106,10 @@ export class ProvenanceViewProvider implements vscode.WebviewViewProvider {
     } else {
       void this.view?.webview.postMessage({ type: 'render', html: emptyFragment() });
     }
+    // A webview view is rebuilt from the shell when it is re-shown, so the bar comes
+    // back empty; ask the service where the index stands again rather than caching it.
+    void this.refreshIngestStatus();
+
     const waiters = this.readyWaiters;
     this.readyWaiters = [];
     for (const waiter of waiters) { waiter(); }
@@ -132,6 +139,9 @@ export class ProvenanceViewProvider implements vscode.WebviewViewProvider {
         return;
       case 'sendToAgent':
         await this.sendToAgent();
+        return;
+      case 'backfill':
+        await this.backfill();
         return;
       case 'showHistory':
         if (message.key) { this.showHistory(message.key); }
@@ -317,6 +327,69 @@ export class ProvenanceViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  // --- indexing --------------------------------------------------------------
+
+  private postStatusBar(
+    note: string,
+    opts: { busy?: boolean; label?: string; isError?: boolean; title?: string } = {},
+  ): void {
+    this.post({
+      type: 'statusbar',
+      note,
+      busy: opts.busy ?? this.ingestBusy,
+      label: opts.label ?? 'Backfill',
+      isError: opts.isError ?? false,
+      title: opts.title ?? '',
+    });
+  }
+
+  /** Read the coverage line off the service. Never blocks a press; never hits Slack. */
+  private async refreshIngestStatus(): Promise<void> {
+    if (this.ingestBusy) { return; }
+    try {
+      const status = await getIngestStatus(this.serviceUrl());
+      this.postStatusBar(coverageNote(status), { title: channelDetail(status.channels) });
+    } catch {
+      // History is served from memory, so the panel is useful with the service down.
+      // Painting an error across the bar would overstate what is broken.
+      this.postStatusBar('');
+    }
+  }
+
+  /**
+   * Index everything posted since the last sync.
+   *
+   * The window is the service's to decide, not the panel's: it holds the checkpoint,
+   * and a timestamp chosen here would drift from the one `python -m provenance.ingest`
+   * writes. The panel only says "catch up" and reports what came back.
+   */
+  private async backfill(): Promise<void> {
+    if (this.ingestBusy) { return; }
+    this.ingestBusy = true;
+    this.postStatusBar('Reading Slack and indexing what is new…',
+                       { busy: true, label: 'Backfilling…' });
+    try {
+      const result = await postIngestSync(this.serviceUrl());
+      this.ingestBusy = false;
+      const through = result.covered_through ? ` · through ${formatTs(result.covered_through)}` : '';
+      this.postStatusBar(
+        result.new_messages === 0
+          ? `Already up to date${through}`
+          : `Indexed ${plural(result.indexed, 'conversation')} from `
+            + `${plural(result.new_messages, 'new message')}${through}`,
+        { title: result.log.join('\n') },
+      );
+    } catch (err) {
+      this.ingestBusy = false;
+      const detail = err instanceof Error ? err.message : String(err);
+      // The service's refusals are paragraphs -- a missing scope and how to add it, a
+      // corpus mismatch and how to resolve it. The bar is one line, so it says that it
+      // failed and the notification carries the instructions.
+      this.postStatusBar('Backfill failed', { isError: true, title: detail });
+      vscode.window.showErrorMessage(`Provenance backfill: ${detail}`);
+    }
+  }
+
   /** Copy the findings as markdown and append them to `.provenance/context.md` in
    *  the workspace, which is where a coding agent is pointed to pick them up. */
   private async sendToAgent(): Promise<void> {
@@ -376,12 +449,54 @@ ${STYLES}
 </head>
 <body>
 <div id="app"></div>
+<!-- Outside #app on purpose: fragments replace that whole subtree on every render,
+     and indexing is not a property of the selection being explained. The bar is the
+     one control that is always available, including before the first query. -->
+<div id="statusbar">
+  <span class="sb-note" id="sb-note">&nbsp;</span>
+  <button id="backfill" title="Index Slack messages posted since the last sync">Backfill</button>
+</div>
 <script>
 ${CLIENT_SCRIPT}
 </script>
 </body>
 </html>`;
   }
+}
+
+// --- the status bar ----------------------------------------------------------
+
+function plural(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? '' : 's'}`;
+}
+
+/** Slack timestamps are epoch seconds; the bar shows them in the reader's timezone. */
+function formatTs(ts: number): string {
+  return new Date(ts * 1000).toLocaleString(undefined, {
+    month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+  });
+}
+
+function coverageNote(status: IngestStatus): string {
+  if (status.never_run) {
+    return 'Nothing indexed yet · Backfill reads the whole history';
+  }
+  if (status.covered_through === null) { return ''; }
+  const docs = status.docs === undefined ? '' : ` · ${plural(status.docs, 'conversation')}`;
+  return `Indexed through ${formatTs(status.covered_through)}${docs}`;
+}
+
+/**
+ * The per-channel detail, for the bar's tooltip.
+ *
+ * The bar itself shows the *oldest* channel's timestamp, because that is the point
+ * the whole index is genuinely caught up to. Which channel is lagging only matters
+ * once someone asks, so it lives in the hover.
+ */
+function channelDetail(channels: Record<string, number>): string {
+  const names = Object.keys(channels).sort();
+  if (names.length === 0) { return ''; }
+  return names.map((name) => `#${name} — ${formatTs(channels[name])}`).join('\n');
 }
 
 // --- fragments ---------------------------------------------------------------
@@ -624,7 +739,22 @@ const STYLES = `
     background: var(--vscode-sideBar-background, var(--vscode-editor-background));
     padding: 10px 12px 28px; line-height: 1.5; font-size: 0.9rem;
     overflow-wrap: anywhere;
+    /* Leave room for the fixed status bar so the last card is never under it. */
+    padding-bottom: 46px;
   }
+  /* Bottom-right, mirroring "Send to agent" at the bottom left of the report. */
+  #statusbar {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 12px;
+    background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+    border-top: 1px solid var(--vscode-panel-border);
+  }
+  .sb-note { flex: 1; min-width: 0; font-size: 0.72rem; opacity: 0.6;
+             white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sb-note.error { color: var(--vscode-errorForeground); opacity: 0.9;
+                   white-space: normal; }
+  #backfill[disabled] { opacity: 0.55; cursor: default; }
   h1 { font-size: 0.98rem; margin: 0 0 4px; font-weight: 600; word-break: break-all; }
   h2 { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em;
        opacity: 0.65; margin: 18px 0 8px; font-weight: 600; display: inline; }
@@ -859,6 +989,18 @@ const CLIENT_SCRIPT = `
     } else if (message.type === 'stage') {
       const el = document.getElementById('stage-text');
       if (el) { el.textContent = message.text; }
+    } else if (message.type === 'statusbar') {
+      const note = document.getElementById('sb-note');
+      const button = document.getElementById('backfill');
+      if (note) {
+        note.textContent = message.note || '';
+        note.className = 'sb-note' + (message.isError ? ' error' : '');
+        note.title = message.title || '';
+      }
+      if (button) {
+        button.disabled = !!message.busy;
+        button.textContent = message.label || 'Backfill';
+      }
     }
   });
 
@@ -907,7 +1049,8 @@ const CLIENT_SCRIPT = `
 
     const button = target.closest('button');
     if (!button) { return; }
-    if (button.id === 'send-to-agent') { vscodeApi.postMessage({ type: 'sendToAgent' }); }
+    if (button.id === 'backfill') { vscodeApi.postMessage({ type: 'backfill' }); }
+    else if (button.id === 'send-to-agent') { vscodeApi.postMessage({ type: 'sendToAgent' }); }
     else if (button.id === 'refresh') { vscodeApi.postMessage({ type: 'refresh' }); }
     else if (button.id === 'retry') { vscodeApi.postMessage({ type: 'retry' }); }
     else if (button.id === 'reveal') { vscodeApi.postMessage({ type: 'reveal' }); }
