@@ -13,18 +13,94 @@ back to ranked semantic search only where they don't.
 
 Three surfaces, one backend contract (`POST /context`):
 
-| Surface | Entry point |
-|---|---|
-| VS Code extension | select code → `cmd+alt+w` / `ctrl+alt+w` |
-| MCP server | a coding agent calls `search_team_context` mid-task |
-| Terminal CLI | `provenance explain webhooks/delivery.py:20-40` |
+| Surface | Entry point | What it adds |
+|---|---|---|
+| VS Code extension | select code → `cmd+alt+w` / `ctrl+alt+w` | evidence sidebar, interactive timeline graph, CodeLens counts, status bar, "Send to agent" |
+| MCP server | a coding agent calls `search_team_context` mid-task | the same answer rendered as markdown, straight into a prompt |
+| Terminal CLI | `provenance explain webhooks/delivery.py:20-40` | plus `provenance graph <sha>` for a commit's chain alone |
 
 None of the three contains its own retrieval logic. They all consume the identical
 `ContextResponse`.
 
+How the pieces fit together, and why: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
 ---
 
-## Quick start
+## Quick start: `provenance-start`
+
+One command brings everything up (Windows, macOS and Linux; needs Node 20+, Docker,
+Python 3.12+ and the VS Code `code` command):
+
+```bash
+cp .env.example .env     # add OPENAI_API_KEY (the only required value)
+npm link                 # once: puts `provenance-start` on your PATH
+cd /path/to/any/git/repo
+provenance-start         # starts everything, then opens VS Code on this folder
+```
+
+After `npm link`, open a new terminal so the command is on `PATH` (on Windows it lands in
+`%APPDATA%\npm`). If you use a Node version manager (nvm-windows, fnm, Volta), global
+commands are per Node version: run `npm link` again after switching.
+
+What it does, in order. Each step checks whether its work is already done, so a re-run
+takes seconds:
+
+| Step | Skipped when |
+|---|---|
+| Configuration: reads `provenance/.env`, fails at once if `OPENAI_API_KEY` is empty | never (instant) |
+| Elasticsearch: starts Docker Desktop if needed, `docker compose up -d`, waits for health | ES already answers |
+| Python: creates `.venv`, `pip install -r requirements.txt` | `.venv` exists and `requirements.txt` is unchanged |
+| Ingest: live Slack if `SLACK_USER_TOKEN` is set, otherwise the seed demo data | `.provenance/ingest_checkpoint.json` exists and the index has documents |
+| Extension: `npm install`, compile, package a `.vsix`, `code --install-extension` | source unchanged and already installed |
+| API service: `uvicorn` on `127.0.0.1:8000`, detached, waits for `/health` | a healthy Provenance service already answers |
+| Open VS Code on the directory you ran the command from | `--no-open` |
+
+```bash
+provenance-start --no-open    # everything except opening VS Code
+provenance-start --logs       # follow the API service log (Ctrl-C leaves the service running)
+provenance-start --reingest   # drop and rebuild the index (spends OpenAI tokens)
+provenance-start --stop       # stop the service and the Elasticsearch container
+provenance-start --help
+```
+
+Things to know:
+
+- **The first run spends tokens.** Ingest sends every thread to OpenAI (embeddings and
+  summaries), from live Slack when `SLACK_USER_TOKEN` is set, from the seed data otherwise.
+  It happens once; later runs skip it while the ingest checkpoint exists and the index has
+  documents. A failed live-Slack ingest stops the launcher; it never falls back to seed
+  data. To use the seed data, leave `SLACK_USER_TOKEN` blank.
+- **Adding a Slack token after a seed ingest replaces the index.** The launcher records
+  which source built the index in `.run/state.json`, so seed threads are never left
+  sitting under a live workspace. Conversely, it never drops an index that has documents
+  unless the checkpoint says it built them.
+- **New Slack messages are the Slack bot's job, not the launcher's.** `provenance-start`
+  only backfills once. The bot writes through the `provenance.ingest` pipeline into the
+  `slack_threads` index using the current embedder (`text-embedding-3-small:1536`);
+  `/health` fails on an embedder mismatch. The service reads the index live, so new
+  documents show up without a restart.
+- **Only `provenance/.env` (and real environment variables) are read.** A `.env` in the
+  folder you run the command from is ignored: it belongs to the repo you're inspecting.
+  Environment variables win over `.env`, like `load_dotenv()`. A Slack token pasted into
+  `OPENAI_API_KEY` is caught at the configuration step, before anything is installed, and
+  the error never echoes the value.
+- **Changed `.env` or pulled new code?** A running service keeps the old settings. The
+  launcher warns when `.env` is newer than the running service; run
+  `provenance-start --stop`, then `provenance-start`.
+- **One launcher at a time.** A lock file in `.run/` stops two runs racing on venv
+  creation, ingest or the service.
+- **Files it writes** (all under `.run/`, gitignored): `service.log`, `service.pid`,
+  `launcher.log` (everything the launcher printed) and `state.json` (hashes that let it
+  skip work).
+- **Overrides:** `PROVENANCE_PYTHON` (interpreter), `PROVENANCE_CODE_BIN` (path to the
+  `code` launcher, e.g. for Insiders/VSCodium), `PROVENANCE_SERVICE_URL` (port; the
+  extension's `provenance.serviceUrl` must match).
+- **Tests:** `npm test` runs the launcher's unit tests — dotenv parsing and precedence,
+  content hashing, the process and HTTP helpers, the pipeline runner's skip/fail
+  reporting, and every branch of the ingest step's "should I re-ingest, and am I allowed
+  to drop the index?" decision.
+
+### Manual steps (macOS/Linux with `make`)
 
 ```bash
 make install          # python3.12 venv + deps   (override: make install PYTHON=python3.13)
@@ -39,14 +115,32 @@ Then, in another shell:
 
 ```bash
 make eval                          # the objective signal — run this after any change
-python scripts/demo_request.py     # one canned request, rendered
+python scripts/demo_request.py     # one canned request, rendered (--raw for the JSON)
 ```
 
 For the extension: `make extension`, then open `extension/` in VS Code and press F5.
 
+Every target:
+
+| Target | What it does |
+|---|---|
+| `make install` | `.venv` + `requirements.txt` |
+| `make es` | Elasticsearch via docker compose, waits for health |
+| `make seed` | regenerate `seed/repo` and `seed/slack` |
+| `make ingest` / `ingest-incremental` / `reconcile` | the three modes, against the seed export |
+| `make slack-check` | can my token read the channel? |
+| `make ingest-slack` / `ingest-slack-incremental` / `reconcile-slack` | the same three modes, against live Slack |
+| `make slackbot` | the on-demand Slack bot (long-running) |
+| `make serve` | `uvicorn` with `--reload` on :8000 |
+| `make mcp` | the MCP stdio server |
+| `make eval` / `make calibrate` | the eval suite; a `NULL_THRESHOLD` suggestion |
+| `make extension` | `npm install` + `tsc` in `extension/` |
+| `make demo` | `es` + `seed` + `ingest` |
+| `make clean` | drop generated seed data, the ES volume, `extension/out` |
+
 ### Requirements
 
-- **Python 3.12+**, **Node.js**, **Docker** (Elasticsearch only).
+- **Python 3.12+**, **Node.js 20+**, **Docker** (Elasticsearch only).
 - **`OPENAI_API_KEY` is required.** Every entrypoint refuses to boot without it.
   There is deliberately no offline or fake-LLM mode: it produces plausible-looking
   output with meaningless content, which silently corrupts every downstream quality
@@ -72,10 +166,12 @@ POST /context
   │                    └─ null threshold: short-circuit before spending rerank tokens
   ├─ rerank            LLM relevance pass — exact hits rescued unconditionally
   ├─ synthesis         cited answer + conflict/supersede detection (one JSON call)
-  └─ resolve_graph     deterministic entity resolution, no LLM, no network
+  └─ resolve_graph     deterministic entity resolution, no LLM
+                       └─ fixture-backed by default; live mode dials the trackers here
 ```
 
-Those six names are also the Sentry span names, so the trace matches the diagram.
+Those six names are also the Sentry span names, so the trace matches the diagram, and
+they come back per request in `timing_ms`.
 
 ### The four ideas that matter
 
@@ -98,6 +194,120 @@ Those six names are also the Sentry span names, so the trace matches the diagram
 4. **The system says "no relevant context" rather than fabricate one.** Enforced
    independently at three layers: the retrieval null threshold, the rerank pass, and
    the synthesis prompt.
+
+### Resolving a commit to its PR
+
+The join is only "exact" if a commit can actually be tied to a pull request, and no
+single convention covers every repository. `gitctx.sha_to_pr` tries three, in order:
+
+1. the squash-merge subject convention (`… (#4821)`);
+2. merge-commit ancestry (`Merge pull request #4821 …`), walking `sha..HEAD`. A commit
+   reachable from a merge's *first* parent was already on main before that PR branched,
+   so it is rejected — without that guard a repository's initial commit is attributed to
+   whichever PR merged first, and the history walk surfaces exactly those old commits;
+3. the GitHub adapter's sha→PR endpoint, which catches rebase-merged commits that keep
+   no PR marker and that no merge commit is an ancestor of.
+
+The first two read only local git: no network, no credentials. The third is skipped
+entirely on the `git log -L` history walk, so a deep history never becomes one network
+round-trip per commit. Plenty of commits genuinely have no PR, and that is a normal
+answer, not a failure.
+
+---
+
+## The HTTP API
+
+The service binds `127.0.0.1` and has no authentication — it is a local tool, and that
+is a deliberate non-goal.
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /context` | the whole pipeline: synthesis, evidence, blame, graph, conflicts, `timing_ms` |
+| `POST /context/count` | retrieval only — no rerank, no synthesis, no graph, and no code-to-prose LLM call; it queries on the extracted symbols instead. Answers `{count, has_exact}`, so ambient discovery costs one embedding rather than a chat completion plus an embedding. |
+| `GET /health` | `ok`, the ES URL, whether the index exists and how many documents it holds, the embedder stamp against the expected one, and `source` — whether the index was built from live Slack or a seed export, so "am I querying the real workspace?" is answerable without eyeballing permalinks. |
+
+Both POST bodies are the same shape: `code`, `file_path` (repo-relative), `repo_root`,
+`line_start`, `line_end` (1-indexed, inclusive) and an optional `language`. The full
+contract lives in [`provenance/models.py`](provenance/models.py) and is mirrored in
+[`extension/src/types.ts`](extension/src/types.ts); Python is the source of truth.
+
+Recoverable failures come back as a populated `message` (user-facing) plus `error`
+(diagnostic) rather than as a 500 — an unreachable Elasticsearch and an embedder
+mismatch each get their own wording and their own fix.
+
+---
+
+## In the editor
+
+The extension is one webview in the activity bar plus three ambient affordances. It
+holds no retrieval logic — it POSTs and renders.
+
+**Commands**
+
+| Command | How it is reached |
+|---|---|
+| Provenance: Explain Selected Code | `ctrl+alt+w` / `cmd+alt+w`, or the editor context menu |
+| Provenance: Re-explain Selected Code (bypass cache) | command palette |
+| Provenance: Open Timeline in Editor | command palette, or the expand button on the graph |
+| Provenance: Explain Range | invoked by CodeLens, not by hand |
+
+**The sidebar** shows the synthesis with `[1]`/`[2]` citations that scroll to the
+matching evidence card; the evidence list (channel, date, participants, why it matched,
+permalink); any conflict or supersede pairs; the resolved graph; and the per-stage
+timings. A breadcrumb of recent selections sits at the top. Explanations are cached by
+*selection identity* — the same lines **and** the same bytes — so revisiting a range is
+instant rather than re-paying query build, rerank and synthesis; `refresh` forces a
+re-run.
+
+**The graph** renders as a vertical dated timeline rather than a layered DAG: in a
+~340px column a DAG scatters into unrelated boxes, whereas the evidence is inherently
+chronological. Person and Ticket nodes are attributes of an event, not events, so they
+render as chips inside their parent's card. The real edges are routed as orthogonal
+connectors in the right gutter, unlabelled until you hover. Edges proven by git or by an
+identity match are solid (`confidence: "exact"`); the conflict and supersede edges the
+synthesis flagged are dashed (`llm-flagged`). Pan, zoom, hover-to-trace and
+click-for-details all work, and "Open Timeline in Editor" reopens the same graph
+full-width with wider cards, more lanes and labels always on.
+
+**CodeLens** puts an "N discussions · exact match" lens above each top-level
+declaration, via `/context/count`. On by default (`provenance.codeLens`), cached per
+document, invalidated on edit, and it never surfaces an error in the gutter — a failed
+probe simply shows nothing.
+
+**The status bar** does the same for whatever is selected, after a 700ms idle debounce,
+and clicking it explains the selection.
+
+**Send to agent** copies the findings as markdown to the clipboard and appends them to
+`.provenance/context.md` in the workspace — the hand-off for a coding agent with no MCP
+connection.
+
+**Settings:** `provenance.serviceUrl` (default `http://127.0.0.1:8000`; must match
+`PROVENANCE_SERVICE_URL` if you moved the port) and `provenance.codeLens`.
+
+### The MCP server
+
+```bash
+make mcp                                # or: python -m provenance.mcp_server.server
+```
+
+An MCP stdio server exposing one tool, `search_team_context`, which takes the same
+selection fields and returns the `ContextResponse` rendered as markdown — agents read
+prose better than JSON, and it pastes straight into a prompt. Point any MCP client at
+that command. If the service is unreachable the tool returns "Provenance is unavailable
+… proceed without team context" rather than failing the agent's turn.
+
+### The CLI
+
+```bash
+pip install -e .                                    # puts `provenance` on PATH
+provenance explain webhooks/delivery.py:20-40       # --repo <path>, --json
+provenance graph 130e156                            # one commit's chain
+```
+
+`explain` POSTs to the same service and renders the response: the origin line, the
+synthesis, the evidence, the conflicts, and an indented walk of the graph (`-EDGE->` for
+proven edges, `~EDGE~>` for inferred ones). `graph` is local and deterministic — it
+resolves the SHA to its PR and draws that chain, with no retrieval and no LLM call.
 
 ---
 
@@ -128,6 +338,12 @@ Jira and Sentry stay optional because of that. GitHub does not: with it unset th
 service refuses to boot, since nothing else can put a title, an author or a merge date
 on the PR chain, and every PR node would render as a bare number.
 
+Live lookups run inside `resolve_graph`, on the request path, so they are kept cheap and
+failure-tolerant: a 4s timeout, a 5-minute cache on successes, and a 60-second per-host
+cooldown after a failure so a dead API is not re-dialled once per node on every request.
+A 404 is a legitimate miss (that PR has no ticket), not an outage, and does not trip the
+cooldown. Nothing in that layer raises.
+
 ### Connecting Sentry
 
 Two different things share the name, and they are unrelated:
@@ -145,8 +361,15 @@ resolved through the one identifier GitHub and Sentry already share:
 PR #4821  --GitHub-->  merge_commit_sha  --Sentry-->  firstRelease:<sha>
 ```
 
-That works only if the repository being analysed names its Sentry releases after the
-merge commit they shipped. [`getsentry/action-release`](https://github.com/getsentry/action-release)
+`firstRelease:` and not `release:`, on purpose: `release:` returns every issue *seen* in
+a release, so a long-lived error would be inherited by every PR since it first appeared.
+The query also sets an empty `statsPeriod`, overriding Sentry's 14-day default — the
+whole point of asking is that the PR is older than anyone's memory of it — and overrides
+the implicit `is:unresolved`, because a resolved incident is still the reason the code
+looks the way it does.
+
+All of that works only if the repository being analysed names its Sentry releases after
+the merge commit they shipped. [`getsentry/action-release`](https://github.com/getsentry/action-release)
 does by default, so the requirement is one workflow in *that* repo, not in this one:
 
 ```yaml
@@ -173,6 +396,19 @@ Version releases some other way (semver, a build number) and this finds *nothing
 rather than something wrong. The one function to change is `_release_for_pr` in
 `provenance/integrations/sentry_issues.py`.
 
+### Connecting Jira
+
+`JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_TOKEN`. The same caveat as Sentry applies, and it
+is stated at the call site rather than hidden: PR-to-ticket is not a plain field in
+Jira. The proper source is the dev-status API, which is undocumented, needs the
+GitHub-for-Jira app installed, and keys on Jira's internal issue id rather than the key
+— so the default live implementation is a JQL text search for the PR number, and is a
+**heuristic**. Lookup by ticket key is exact on both backends.
+
+`lookup_by_pr` returns a *list* on both the ticket and the incident adapters: nothing in
+the real world guarantees a 1:1 mapping, and a PR can close two tickets or touch two
+incidents.
+
 ---
 
 ## Ingest modes
@@ -187,94 +423,35 @@ make reconcile           # drift detection between export and index
 messages to `ts > checkpoint` and segmenting only those is **wrong**: a reply arriving
 today on a three-week-old thread would be segmented in isolation and would overwrite
 the real, larger thread with a truncated summary. So the incremental run expands new
-messages to *affected* ones — the full thread, or the full burst — and rebuilds those
+messages to *affected* ones — the whole thread, or the whole burst, computed to a
+fixpoint so a chain of new messages pulls in everything it reaches — and rebuilds those
 completely. Cost stays proportional to affected threads, not corpus size, and the
 deterministic document id makes the re-index a transparent overwrite.
 
 `--mode reconcile` classifies every unit as `missing` / `changed` / `stale` by content
-hash, reprocesses the first two, and deletes the third.
+hash, reprocesses the first two, and deletes the third. It stands in for "webhooks got
+missed" in a system with no webhooks to miss, and it is what catches edits, deletions,
+replies to old threads and newly added channels. Its known scaling limit is stated
+rather than solved: it re-segments the entire source on every run.
 
 Each mode reads its source **before** it writes, deletes or checkpoints anything, so a
 failed read (a Slack outage, a rate limit) leaves the index as it was.
 
-### The Backfill button
-
-The Provenance panel has a **Backfill** button in the bar along its bottom edge, with
-a line to its left saying how far the index is caught up. It runs `--mode incremental`
-against the same `.provenance/ingest_checkpoint.json` the CLI uses, so a sync started
-from the panel and one started from a terminal share one notion of what is already
-indexed and neither re-pays for the other's work.
-
-The window is the checkpoint's, not the clock's. Each press indexes messages newer
-than the recorded per-channel timestamp, and records the new one when it finishes —
-press it twice and the second press says *Already up to date*. With no checkpoint at
-all every message is new, so the first press is a full backfill and every press after
-it is the delta; there is no separate first-run path.
-
-The bar shows the **oldest** channel's timestamp, since that is the point the whole
-index is genuinely caught up to. Which channel is lagging is in the tooltip.
-
-Two endpoints back it, both usable directly:
-
-```bash
-curl localhost:8000/ingest/status        # coverage; reads the checkpoint, never Slack
-curl -XPOST localhost:8000/ingest/sync   # index what is new
-```
-
-`/ingest/sync` refuses rather than guesses in three cases: a sync is already running
-(409), the token cannot read the channels (503, with the same verdict `make
-slack-check` prints), or the index was built from a different corpus than
-`USE_MOCK_DATA` currently selects (409). The last one matters — without it, pressing
-Backfill on a seed-built index with `USE_MOCK_DATA=false` would quietly read a live
-workspace in alongside the demo corpus, and `/health` would still name only one of
-them.
-
-### When timestamps don't mean anything
-
-Segmentation groups threads by `thread_ts`, which is exact. Everything else — loose
-top-level messages — it groups by *time*, splitting wherever a gap exceeds
-`SEGMENT_GAP_SECONDS`. That only works in a channel people wrote in over days.
-
-A channel that was **seeded or bulk-posted** breaks it. Slack stamps each message with
-the moment it was posted and `chat.postMessage` won't accept a backdated `ts`, so a
-script pasting a dozen separate conversations leaves seconds between all of them. No
-threshold separates them: 45 minutes glues the entire channel into one unit, and a few
-seconds would cut real conversations apart mid-sentence. The distributions overlap, so
-there is no better number to pick.
-
-Every ingest mode now measures this and says so:
-
-```
-  ! loose messages arrive too close together for gaps to mean anything:
-      #eng-general: 41 loose messages, median gap 8s, p90 17s, widest 2m
-    rule 2 splits on gaps over 45m, so every loose message above lands in one
-    blended unit -- one summary, one vector, one permalink for unrelated conversations.
-```
-
-Two fixes, best first:
-
-1. **Post those conversations as Slack threads.** `thread_ts` then answers the question
-   exactly and no inference happens at all.
-2. **`SEGMENT_TRUST_TIME=false`** in `.env`. Loose messages are never merged on time;
-   each becomes its own unit, keeping the ones that say something (a file path, a PR or
-   ticket ref, a backticked identifier, a link, or enough prose). A thin summary of a
-   real message beats a blended summary of five unrelated ones.
-
-It is an explicit flag rather than something ingest infers per run, because the Slack
-bot segments recent history while batch ingest segments the whole channel — a
-data-derived verdict could differ between them, and their unit boundaries, and so their
-document ids, would stop agreeing.
-
-Rule 4 (splitting a unit over `MAX_MESSAGES_PER_UNIT`) is free of timestamps for the
-same reason: it takes sequential windows rather than cutting at the widest internal
-gap, so a few seconds of noise no longer decides where a long thread is divided. Both
-cuts are equally stable when a thread gains replies, and both re-cut after a deleted
-message — that case is `--mode reconcile`'s job either way.
+Segmentation is four fixed, deliberately un-ML rules: anything with a `thread_ts` groups
+by thread; what is left splits into bursts on a gap over `SEGMENT_GAP_SECONDS` (45 min);
+units over `MAX_MESSAGES_PER_UNIT` (60) split recursively at their widest internal gap;
+units under `MIN_MESSAGES_PER_UNIT` (3) are dropped unless a trigger reaction says a
+human flagged them. A unit's id derives from its first message's timestamp, which is
+what makes every mode idempotent across runs.
 
 Ingest has two sources: a static export directory (`--source export`, the seed demo
 above) and the live Slack channel (`--source slack`, next section). Both feed the same
 pipeline, and which one is the default follows `USE_MOCK_DATA`. Shared Slack reads use
 the installed workspace bot; browser OAuth is reserved for private local indexing.
+pipeline — and the same per-message filtering and text cleaning — so they index
+identical text. Which one is the default follows `USE_MOCK_DATA`. Still **not** built:
+an OAuth login flow and an Events API webhook receiver — you paste a token, and
+`--mode incremental` / `--mode reconcile` are the sync mechanism.
 
 ---
 
@@ -328,9 +505,17 @@ it before reading. A pasted allowlist is safer when the shared retrieval audienc
 narrower than the workspace; it prevents a public channel from entering Elasticsearch
 by accident. Private channels are excluded from shared backfill even if the bot was
 invited to them.
+`slack-check` makes four real calls rather than inferring anything from scopes — token
+present, token valid and for the right workspace, channel visible, channel readable — so
+its answer is right for public and private channels alike. It names which of these is
+wrong, and what to do: no token, a bad or revoked token, a token for the wrong
+workspace, a private channel you are not a member of, or a missing scope.
 
-Set `SLACK_CHANNEL_TIERS` alongside it — `eng-incidents:1,social:3` — or every channel
-weighs the same and a watercooler thread ranks with an incident review.
+**Channel tiers.** A live workspace has the same spread of signal and noise the seed
+corpus encodes, and one flat tier throws that away — the channel weight is 1.5 / 1.0 /
+0.7, so an incident channel and a watercooler channel would rank the same.
+`SLACK_CHANNEL_TIER` sets the default; `SLACK_CHANNEL_TIERS` overrides per channel by
+name, e.g. `incidents:1,eng-backend:2,watercooler:3`.
 
 **Keeping it in sync.** `incremental` re-reads the last few days and threads whose parent is
 newer than `SLACK_THREAD_LOOKBACK_DAYS` (default 14). A reply to an older thread, an edit,
@@ -339,6 +524,14 @@ a deletion, or a channel newly added to `SLACK_BOT_CHANNEL_IDS` is picked up by 
 Treat the bot token like a password. `.env` is gitignored, but it may still be synced by
 other software. Shared-ingest message text is sent to OpenAI for summarization and
 embeddings, then stored in the shared Elasticsearch index.
+- `.env` is gitignored, but this folder may live in OneDrive or another synced location,
+  which uploads it. Treat the token like a password; revoke it from the Slack app page if
+  it leaks.
+- The token is only ever sent in an `Authorization` header. It is never logged, and no
+  exception message contains it — Slack errors carry the error code only.
+- Message text is sent to OpenAI (summaries and embeddings) and stored in your local
+  Elasticsearch, which runs with security disabled (`docker-compose.yml`). That is fine
+  for your own machine; do not point it at a shared server.
 
 ---
 
@@ -349,10 +542,8 @@ on demand, from inside Slack** — so a discussion that finished two minutes ago
 already be matched against code you are about to write. That is the live loop: talk it
 through in Slack, index the thread, write the code, select it, see the thread come back.
 
-This is a **single workspace app**, not one app or user token per person. Install it
-once, run one long-lived bot process against the team's shared Elasticsearch and
-Provenance service, and every member can invoke it in an approved channel. It uses
-Socket Mode, so the hosted process needs no public inbound URL or tunnel.
+It runs over **Socket Mode**, so it needs no public URL and no tunnel — the process
+dials out to Slack from your machine and writes straight to your local Elasticsearch.
 
 **Two ways to trigger it**
 
@@ -362,84 +553,29 @@ Socket Mode, so the hosted process needs no public inbound URL or tunnel.
 | `/provenance` | it can't — Slack does **not** put `thread_ts` in a slash-command payload, so it offers the channel's recent conversations as buttons | type, then click |
 | `/provenance <message link>` | parses the link | for a conversation further back |
 
+`/provenance help` prints the same summary inside Slack.
+
 Un-threaded conversations work too. `/provenance` re-segments recent history with the
 same burst rule the batch ingest uses, so a run of messages straight in the channel is
-offered as one conversation and indexed as one unit.
+offered as one conversation and indexed as one unit. The picker reports a thread's real
+size and sorts on its latest reply, so the conversation you just finished is at the top.
 
-**Workspace-admin setup**
+**Setup** (on top of [Connecting to Slack](#connecting-to-slack))
 
-1. In the target workspace, create or update the internal Slack app from
-   [`slack_app_manifest.yml`](slack_app_manifest.yml), then **install it to the
-   workspace**. An admin approval may be required. The manifest grants the bot the
-   read scopes it needs; no member needs to create an app or supply a user token.
-2. Put two app secrets in the hosted bot's secret manager (or its `.env`):
+1. Paste [`slack_app_manifest.yml`](slack_app_manifest.yml) into your app's **App
+   Manifest** page and **reinstall**. It adds a bot user, Socket Mode, the
+   `/provenance` command and the message shortcut.
+2. Copy three values into `.env` — reinstalling reissues the user token, so re-copy
+   that one even if you already had it:
 
    ```bash
+   SLACK_USER_TOKEN=xoxp-...   # OAuth & Permissions -> User OAuth Token
    SLACK_BOT_TOKEN=xoxb-...    # OAuth & Permissions -> Bot User OAuth Token
    SLACK_APP_TOKEN=xapp-...    # Basic Information -> App-Level Tokens (connections:write)
-   SLACK_BOT_CHANNEL_IDS=C0123ABC,C0456DEF
    ```
 
-   `SLACK_BOT_CHANNEL_IDS` is mandatory policy, not a convenience setting: include
-   only channels whose content may enter the shared index. To permit every *public*
-   channel, set `SLACK_BOT_CHANNEL_IDS=*`; the bot joins each public channel the first
-   time somebody uses it there. For a private channel, invite Provenance in Slack
-   before it can be indexed.
-3. Run `make slackbot` as a durable service next to the shared Elasticsearch and
-   Provenance API. It verifies the workspace bot token before accepting commands.
-   Keep `OPENAI_API_KEY`, the bot tokens, and Elasticsearch private to that service;
-   do not run a separate copy on each developer laptop.
-
-To add a new channel later: invite Provenance (if private), append its channel ID to
-`SLACK_BOT_CHANNEL_IDS`, and restart the bot deployment. Members can then use the
-message shortcut or slash command immediately. With `SLACK_BOT_CHANNEL_IDS=*`, no
-restart is needed for new public channels; private channels still require an invite.
-
-### Deploying the shared Slack bot
-
-On one always-on team host with Docker installed, this is the entire launch command:
-
-```bash
-cp .env.example .env       # first time only; fill in the secrets below
-make deploy
-```
-
-Set these values in `.env` before the first launch:
-
-```bash
-OPENAI_API_KEY=...
-USE_MOCK_DATA=false
-GITHUB_APP_ID=5006027
-GITHUB_APP_PRIVATE_KEY_FILE=/secure/path/provenance.private-key.pem
-SLACK_BOT_TOKEN=xoxb-...
-SLACK_APP_TOKEN=xapp-...
-SLACK_BOT_CHANNEL_IDS=C0123ABC,C0456DEF
-```
-
-`make deploy` starts a persistent shared Elasticsearch index, the Provenance API, and
-the Socket Mode bot. Check it with `make deploy-logs`; stop it with `make deploy-down`
-(the indexed data remains in Docker's named volume). This command is safe to run again
-after changing `.env` or code; Docker rebuilds/restarts the affected services.
-
-`USE_MOCK_DATA=false` is required for a real team deployment. The API uses the GitHub
-App's short-lived installation token for the repository detected by the extension;
-the private key is mounted read-only and is never sent to a developer's machine. An
-installation must exist for each private repository you want to analyze. The legacy
-`GITHUB_TOKEN` / `GITHUB_REPO` variables still work for a single fixed repository.
-If you only want to smoke-test the container setup, leave the default
-`USE_MOCK_DATA=true` temporarily.
-
-To enable all public Slack channels instead, set `SLACK_BOT_CHANNEL_IDS=*` and run
-`make deploy` after updating the app manifest/reinstalling it. This grants broad
-indexing access; only do it when the shared retrieval service has the same audience as
-those public channels. Slack does not let a bot self-join private channels, so a member
-must invite Provenance to each private channel that should be indexed.
-
-The API binds to `127.0.0.1:8000` by default. That is intentional: this project does
-not yet authenticate `/context`, so do not set `PROVENANCE_API_BIND=0.0.0.0:8000` or
-publish it to the internet. To let teammates' extensions use the shared retrieval
-service, put it behind your company's authenticated HTTPS reverse proxy or private
-network gateway, then set their `PROVENANCE_SERVICE_URL` to that protected URL.
+3. `make slackbot`. It verifies the tokens before accepting a single command, and
+   prints which workspace permalinks will point at.
 
 **Getting an exact match, not a hopeful one**
 
@@ -458,131 +594,84 @@ Indexing adds a :pushpin: in Slack. That is not decoration: `segment` drops unit
 `MIN_MESSAGES_PER_UNIT` (3) unless a trigger reaction says a human flagged it, so
 without the pin the next `make ingest-slack` would re-segment the channel, not rebuild
 a short conversation, and `--mode reconcile` would delete it as stale. The pin also
-earns the thread `REACTION_BOOST` at query time.
+earns the thread `REACTION_BOOST` at query time. It is added with *your* user token, so
+it reads as yours and needs no bot membership of the channel.
 
 Everything else is shared with the batch path rather than reimplemented. The document
 id is a UUID5 of `channel_id/thread_id`, and `thread_id` is the first message's
 timestamp — so the bot and a later `make ingest-slack` write **the same `_id`** for the
-same conversation. They overwrite each other; neither duplicates.
+same conversation. They overwrite each other; neither duplicates. A thread longer than
+`MAX_MESSAGES_PER_UNIT` splits into exactly the pieces a batch ingest would produce, all
+of them are written, and the reply says so.
 
 **Limits worth knowing**
 
-- Reads and the :pushpin: reaction use the workspace bot token. A member cannot use
-  the app to index a channel outside `SLACK_BOT_CHANNEL_IDS`; the bot tells them how
-  to request access. Slack still requires the bot to be invited to private channels.
-- The shared index is not per-user access controlled. Do not allow private or
-  sensitive channels unless the shared Provenance API and Elasticsearch have matching
-  access controls.
+- Reads use `SLACK_USER_TOKEN`, so the bot sees exactly what you see. The bot token
+  only carries command plumbing, and replies go over each interaction's
+  `response_url` — it never posts into a channel.
 - The picker reads one page of history (`SLACK_BOT_HISTORY_MESSAGES`, 200 messages,
   never paginated). It answers "what was just being talked about", not "search".
+- Indexing a conversation in a channel outside `SLACK_CHANNEL_IDS` works, and the reply
+  warns you that a full re-ingest won't cover it.
+- Slack gives a listener three seconds to acknowledge, and an index costs a summary plus
+  an embedding, so every trigger acks immediately and reports back over `response_url`
+  once the work is done.
 
 ---
-
-## Public and private channels
-
-One Backfill press, two destinations.
-
-| | Public channels | Private channels |
-| --- | --- | --- |
-| Read with | the token the service is configured with | **your** Slack account, granted in the browser |
-| Indexed into | the shared company Elasticsearch | an encrypted store on your machine |
-| Who can retrieve it | anyone using this Provenance | you, on this laptop |
-| Badge in the panel | **Workspace** | **Only visible to you** |
-
-The split is made once, where the channel list is built: `check_access` records
-`is_private` for every channel, and `load_slack` reads one plane at a time. The
-service passes `private=False` and therefore cannot see a private channel even by
-accident; the connector passes `private=True` and sees nothing else.
-
-### Connecting your Slack account
-
-The private half needs a token that is yours rather than the company's, so it is
-granted the way a native app grants one — in a browser, once:
-
-1. **Provenance: Connect Slack (private channels)** in the command palette
-2. Slack asks whether Provenance may read the channels you're in; you approve
-3. The token lands in your OS keychain — macOS Keychain, Windows Credential
-   Manager, Secret Service on Linux — not in `.env`, not in the repo
-
-Set `SLACK_CLIENT_ID` in `.env` and register the redirect URL from
-`slack_app_manifest.yml` once, for everyone. If your Slack app is configured as a
-confidential OAuth client (the usual Slack app configuration), also set
-`SLACK_CLIENT_SECRET` locally from **Settings → Basic Information → App Credentials**.
-It is used only to exchange the one-time code and must never be committed. Slack
-matches redirect URLs exactly, so the connector's port is pinned:
-`PROVENANCE_LOCAL_PORT=51737`.
-
-If your workspace restricts app installs, **Paste a token** takes an `xoxp-` user
-token instead and verifies it before storing it.
-
-> Keep the Slack app **internal**. Since 2025-05-29 Slack throttles
-> `conversations.history` to 1 request/minute for apps with Public Distribution
-> enabled, which makes a backfill impractical. Distribution is only needed to share
-> an install link publicly; workspace members can authorize an internal app without
-> it.
-
-### What the connector is
-
-A separate process, on your machine, holding your token and your index. It binds
-loopback only — that is asserted in code rather than configured, because a private
-index reachable from the network is not a private index. The editor starts it and
-authenticates every call with a secret generated per launch and passed through the
-environment, never on the command line where other users could read it.
-
-Everything describing a conversation is encrypted at rest: text, summary, channel
-name, permalink, participants, and the embedding vector. Exact matching still works
-because file paths, PR numbers, commit shas and identifiers are stored as keyed
-HMACs rather than plaintext — equality survives, the values do not.
-
-Summarizing and embedding send text to a model provider, so the first private
-backfill asks for consent and records it. Revoking it stops future private indexing;
-deleting the index deletes the consent with it.
-
-```bash
-make local-status     # what is indexed here, and which Slack account
-make local-purge      # conversations, checkpoints, consent, key and token
-```
-
-Or from the palette: **Private Index Status**, **Delete My Private Index**.
-
-### How results come back
-
-The panel asks both planes at once and merges them on your machine. The scores are
-not comparable — the shared side's are rank-fusion numbers around 0.016, the private
-side's are cosine similarities around 0.8 — so ranking is by the order each side
-produced: exact matches first, then the two lists interleaved. Citations in the
-synthesis are renumbered to follow their evidence, because a synthesis citing `[2]`
-while `[2]` has become a different thread attributes a claim to evidence that does
-not support it.
 
 ## The seed corpus
 
 `make seed` regenerates `seed/repo` (a real git repo with backdated commits) and
 `seed/slack` (a Slack export) from `seed/_repo_files.py` and `seed/_slack_data.py`.
 Both are gitignored and neither is ever hand-edited — delete and regenerate freely.
+It also rewrites `seed/mock_integrations/github_prs.json` so its `commit_shas` carry the
+SHAs git actually produced: content-addressed SHAs cannot be forced to fixed values, so
+that one field is regenerated while the PR numbers, titles, authors and dates — what
+every join actually keys on — stay literal.
 
-The story it encodes:
+The story it encodes is one constant revised four times, each revision driven by an
+incident, and each revision *still true* — which is what makes the chain worth
+recovering rather than just the latest value:
 
 | When | What |
 |---|---|
-| 2026-01-12 | `#eng-payments` — Jordan proposes a 5s retry backoff |
+| 2025-08-14 | `#eng-payments` — settlement batches time out; `SETTLEMENT_TIMEOUT_SECONDS` → 90s |
+| 2025-08-15 | PR #3902 merges the 90s timeout |
+| 2026-01-12 | `#eng-payments` — Jordan proposes a 5s retry backoff, off a stale runbook number |
 | 2026-01-18 | PR #4100 merges: `RETRY_BACKOFF_SECONDS = 5` |
 | 2026-01-25 | WEBHOOK-184 fires; ENG-4821 opens |
 | 2026-01-28 | `#eng-incidents` — "5s was still inside the failover window … went with 7s (#4821)" |
 | 2026-02-11 | PR #4821 merges: `RETRY_BACKOFF_SECONDS = 7` |
+| 2026-03-02 | `#eng-incidents` — WEBHOOK-201: a fixed 7s puts every queued delivery back on the wire at once |
+| 2026-03-09 | PR #5012 merges: `RETRY_JITTER_SECONDS = 2.5`, floor stays at 7s |
+| 2026-03-30 | `#eng-incidents` — WEBHOOK-233: four attempts can pin a worker for ~40s |
 | 2026-04-02 | `#eng-incidents` — 7s held through the April failover |
+| 2026-04-06 | PR #5233 merges: `MAX_RETRY_WINDOW_SECONDS = 45` |
 
-Selecting `webhooks/delivery.py:20-40` should recover all of it, *and* report that the
-2026-01-12 proposal was superseded by the 2026-01-28 decision.
+Selecting `webhooks/delivery.py:20-40` spans all three surviving constants. Blame
+resolves #4821, #5012 and #5233; `git log -L` reaches back to #4100, whose 5s the code
+no longer reflects — so that PR reaches the graph carrying a `SUPERSEDES` edge, and the
+2026-01-12 proposal is reported as superseded by the 2026-01-28 decision rather than as
+a live constraint. The fixtures hang ENG-4821 / ENG-5012 / ENG-5233 and
+WEBHOOK-184 / -201 / -233 off those PRs.
 
-The corpus also contains two distractors with deliberately overlapping vocabulary
-(`search/indexer.py` retry logic, `webhooks/signing.py` secret rotation) and one file
-with no Slack evidence at all — `utils/strings.py`, the null case. Without those, the
+The corpus also contains three distractors — `search/indexer.py` retry logic in
+`#eng-search` (deliberately overlapping vocabulary: retries, backoff, jitter, and a
+message saying outright it is a different failure mode), `webhooks/signing.py` secret
+rotation in `#eng-payments`, and office chatter in `#eng-general` (tier 3) — plus one
+file discussed nowhere at all: `utils/strings.py`, the null case. Without those, the
 null-threshold and exact-vs-semantic evals would mean nothing.
 
-Two PR numbers referenced in Slack (#3902, #3455) are intentionally absent from the
-mock fixtures, which exercises the "adapter has no match" path: the adapters return
-empty, and the graph simply omits the node.
+Three PR numbers referenced in Slack (#3902, #3455, #4150) are intentionally absent from
+the mock fixtures, which exercises the "adapter has no match" path: the adapters return
+empty and the graph simply omits the node.
+
+Two details in the corpus are deliberate, not incidental. Message texts are written so
+`ingest/extract.py`'s regexes fire on the *conversation unit* rather than on any single
+message — a bare `#4821` is only trusted in code-adjacent context, so every thread
+naming a PR by number also carries a github.com URL or the literal token "PR" somewhere
+in the same unit. And the Slack display names match the git commit author names, which
+is what lets `AUTHOR_MATCH_BOOST` actually fire in the demo.
 
 ```bash
 python seed/build_seed.py --append           # a late reply, to test incremental
@@ -598,13 +687,26 @@ make eval        # the full suite against a running service
 make calibrate   # suggest a NULL_THRESHOLD for your actual corpus
 ```
 
-The suite checks that expected evidence appears and at what rank, that the null case
-returns zero results and a message, and that the conflict case produces both a
-non-empty `conflicts` list and a `CONFLICTS_WITH`/`SUPERSEDES` edge in the graph.
+Three cases: the retry-backoff chain (expects the original proposal, the decision that
+replaced it and the incident follow-up, plus a `CONFLICTS_WITH`/`SUPERSEDES` edge in the
+graph), the settlement timeout, and the null case. The suite checks that expected
+evidence appears and at what rank, that a synthesis came back, that the null case
+returns zero results and a `message`, and that the conflict case produces both a
+non-empty `conflicts` list and the matching graph edge.
+
+Expected evidence is pinned to a marker phrase from the **thread's own words**, never
+from its summary. A summary is regenerated on every ingest, and a model that writes
+"five-second retry" one run writes "5-second retry" the next; that is not hypothetical —
+it is how this suite once went red, reporting a missing thread that was in fact ranking
+first. Slack text only changes when a person edits it.
 
 `NULL_THRESHOLD` in `config.py` ships as a **starting point, not a fact**. Calibrate
 it against your own ingested corpus before trusting it: `make calibrate` prints the
-best null score and the worst still-relevant score and suggests their midpoint.
+best null score and the worst still-relevant score and suggests their midpoint. It runs
+in-process rather than over HTTP, because the absolute dense score it compares against
+is an internal retrieval value and is deliberately not part of the `/context` contract.
+If the two overlap it says so: no threshold separates them, and the corpus or the
+prompts need work before the number can mean anything.
 
 > Any change to a prompt, a weight in `config.py`, or the Elasticsearch query shape
 > must be verified against this harness before being trusted. It is the only
@@ -620,7 +722,8 @@ implementation strategies without touching any caller:
 - **`ES_USE_NATIVE_RRF`** — `True` uses Elasticsearch's native `retriever`/`rrf`
   combinator (8.16+, licence-gated). `False` issues a `knn` search and a `match`
   search separately and fuses them with Python-side RRF (`k=60`). Both produce
-  identical output shapes.
+  identical output shapes. It ships `False`, because this deployment runs on a basic
+  ES licence, which does not include RRF.
 - **`ES_USE_NATIVE_FUNCTION_SCORE`** — `True` applies the relevance weights
   server-side; `False` applies the identical weights in Python to the fused score.
   See the note at the top of `service/retrieve.py`: Elasticsearch cannot nest a
@@ -638,33 +741,62 @@ now also applies it per result, at the weaker of `best × 0.85` and `NULL_THRESH
 never discarding a hit that would have been reported as relevant had it arrived alone.
 Exact-tier hits are exempt; they are asserted, not scored.
 
+**What may enter the exact tier.** A symbol match is asserted evidence that no later
+stage may discard, so it has to be distinctive: at least `EXACT_SYMBOL_MIN_CHARS` (4)
+characters *and* shaped like an identifier — carrying an underscore, a dot, or an
+internal capital after a lowercase. A live corpus's extracted symbols include
+`Provenance`, `Elasticsearch` and `Explain`, ordinary words the summarizer capitalised,
+and matching code against the word "Elasticsearch" would be unfilterable noise.
+`RETRY_BACKOFF_SECONDS`, `print_hello_world`, `settlement.py` and `SlackThread` all
+pass; PR and ticket references fail the shape test and are matched by `pr_refs` and
+`ticket_refs`, where they belong. Filenames are indexed as bare basenames alongside full
+paths, because engineers say "settlement.py" in Slack far more often than
+"payments/settlement.py" — at a lower exact strength, since a basename is not unique.
+
 The relevance weights themselves: Gaussian time decay around the commit
 (**symmetric on purpose** — a "this broke prod" thread from *after* the commit is
 often the most valuable evidence there is, and must not be penalised more than a
 pre-commit thread the same distance away), an author-match boost when a blame author
 participated in the thread, a channel-tier weight, and a bookmark-reaction boost.
 
+Other constants worth knowing: `GIT_HISTORY_MAX_COMMITS` (25) caps the `git log -L`
+walk, which runs on the request path and grows with the file's history;
+`INTEGRATION_TIMEOUT_SECONDS`, `INTEGRATION_CACHE_TTL_SECONDS` and
+`INTEGRATION_FAILURE_COOLDOWN_SECONDS` bound the live adapters; `LLM_MAX_RETRIES` and
+`LLM_RETRY_BASE_SECONDS` govern the jittered backoff on OpenAI 429/5xx (a non-429 4xx is
+never retried — it will not succeed); `MAX_CODE_CHARS` truncates a long selection rather
+than rejecting it; `EXACT_TIER_CAP` (3) bounds how many asserted hits bypass the
+reranker.
+
+Models: `text-embedding-3-small` (1536 dims) for embeddings, `gpt-4o-mini` for
+summaries, code-to-prose and rerank, `gpt-4o` for synthesis. The embedder id is stamped
+into the index at build time and checked on every request, so vectors from two different
+models are never compared.
+
 ---
 
 ## Layout
 
 ```
+bin/provenance-start.js   the one-command launcher's entry point
+launcher/                 its steps, pipeline runner, probes and unit tests
 provenance/
   config.py          every tunable constant
   models.py          the frozen contract shared by all four surfaces
   llm.py             the only module that calls OpenAI
   observability.py   Sentry, no-op when unconfigured
   integrations/      GitHub / tickets / incidents: fixtures or live, one adapter each
-  ingest/            Slack -> Elasticsearch: sync.py is the library, three modes
+  ingest/            Slack -> Elasticsearch: export and live readers, three batch modes
   slackbot/          the on-demand bot: one conversation, indexed from Slack
-  local_agent/       the private half: Slack sign-in, encrypted on-device store,
-                     local retrieval, loopback API
   service/           the live /context pipeline
   mcp_server/        MCP stdio server
   cli/               terminal surface
-extension/           VS Code extension (TypeScript)
-seed/                deterministic demo corpus generator
-evals/               the eval harness
+extension/src/       VS Code extension: view (sidebar + timeline panel), graph (the SVG
+                     timeline renderer), codelens, api, types
+seed/                deterministic demo corpus generator + integration fixtures
+evals/               the eval harness and its fixed query set
+scripts/             one canned request, for checking the service by hand
+docs/ARCHITECTURE.md how it all fits together, and where it is fragile
 ```
 
 External systems beyond git and Slack ship **mocked by default** — but as real adapter
@@ -675,13 +807,12 @@ their live APIs at once. No caller changes either way; see
 
 ## Non-goals
 
-Events API webhooks (Backfill is a press, not a subscription); multi-tenancy, SSO on
-the service, and a job queue — this is one company's deployment, and the shared index
-is protected by being reachable only from inside it; per-user filtering of a shared
-index (the private plane is a separate store, not a filter); a channel-approval UI;
-reconciliation of the private store, so a message deleted in Slack stays in a local
-index until that index is purged; MCP-client connectors for the trackers (they are
-plain REST adapters behind `USE_MOCK_DATA`); multi-repository support;
-embedding-based topic-shift segmentation; an offline/fake-LLM mode; a second
-retrieval implementation for the terminal or MCP path; fuzzy cross-source identity
-resolution for `Person` nodes (name-string matching only).
+A Slack OAuth login flow and Events API webhooks (live Slack is read with a pasted user
+token instead); per-user filtering on a shared index; a channel-approval UI; MCP-client
+connectors for the trackers (they are plain REST adapters behind `USE_MOCK_DATA`);
+multi-repository
+support; auth on the FastAPI service; embedding-based topic-shift segmentation;
+an offline/fake-LLM mode; a second retrieval implementation for the terminal or MCP
+path; production-scale reconciliation sharding; fuzzy cross-source identity resolution
+for `Person` nodes (name-string matching only); tree-sitter symbol extraction (regex
+today, behind a deliberately swappable seam).
