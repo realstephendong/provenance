@@ -58,20 +58,23 @@ class Result(BaseModel):
 
 
 class CommitInfo(BaseModel):
-    """One commit that owns at least one line of the selected range.
+    """One commit in the selected range's history.
 
-    `BlameInfo` already carried the *set* of touching commits in `all_shas`, but
-    flattened away which author, which date and which PR belonged to which commit --
-    so the graph could only ever draw the dominant one. This is that lost detail.
+    Two kinds live here. A `current=True` commit still owns at least one line of the
+    selection, which is what `git blame` reports. A `current=False` commit touched
+    those lines at some point and was overwritten since, which only `git log -L`
+    knows -- it is the PR whose decision the code no longer reflects, and it is
+    exactly the one whose Slack thread would otherwise read as a live constraint.
     """
 
     sha: str                        # short (7)
     author: str | None = None
     date: str | None = None         # YYYY-MM-DD
     ts: float | None = None
-    lines: int = 0                  # lines of the selection this commit owns
+    lines: int = 0                  # lines of the selection this commit owns *now*
     pr_number: int | None = None
     dominant: bool = False          # owns the most lines of the range
+    current: bool = True            # False = superseded by a later commit in the chain
 
 
 class BlameInfo(BaseModel):
@@ -83,9 +86,11 @@ class BlameInfo(BaseModel):
     commit_date: str | None = None
     commit_ts: float | None = None
     uncommitted: bool = False
-    # Per-commit detail, most lines first. The scalar fields above describe
-    # `commits[0]` and are kept because the CLI, the MCP server and the extension
-    # header all read them.
+    # Per-commit detail, oldest first: the range's story in the order it happened,
+    # which is the order every surface renders. The scalar fields above still
+    # describe the *dominant* commit -- they anchor retrieval's time decay and the
+    # "Origin" line the CLI, the MCP server and the extension header print, and
+    # neither of those means "the oldest thing that ever touched this".
     commits: list[CommitInfo] = Field(default_factory=list)
 
 

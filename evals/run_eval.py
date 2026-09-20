@@ -133,7 +133,9 @@ async def _best_dense(repo: Path, file_path: str, start: int, end: int) -> float
     from provenance.service import gitctx, query_build, retrieve
 
     code = _read_range(repo, file_path, start, end)
-    blame = gitctx.blame(str(repo), file_path, start, end)
+    # with_history, to match exactly what POST /context feeds retrieval -- a threshold
+    # calibrated against a narrower blame than production uses is not a calibration.
+    blame = gitctx.blame(str(repo), file_path, start, end, with_history=True)
     queries = await query_build.build_queries(code, file_path, None)
     found = await retrieve.retrieve(load.client(), queries, blame, file_path)
     return found["best_dense"]

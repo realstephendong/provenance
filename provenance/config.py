@@ -36,12 +36,26 @@ def require_api_key() -> None:
         )
 
 
+# --- Mock vs live data ---------------------------------------------------------
+# The single switch between the demo corpus and a real workspace. True (the default)
+# serves every integration from the JSON fixtures under seed/mock_integrations and
+# points ingest at a Slack export directory; False runs GitHub, Jira, Sentry and
+# Slack for real.
+#
+# There is deliberately no fixture fallback when this is False. An answer that
+# silently substitutes a fabricated PR title or an invented incident is worse than
+# one missing a node -- it is the same failure mode the README rejects for a
+# fake-LLM mode, and provenance is the one product that cannot afford invented
+# evidence. A live lookup that fails contributes nothing instead, which every caller
+# already handles (18 row 23).
+USE_MOCK_DATA = os.environ.get("USE_MOCK_DATA", "true").strip().lower() not in {
+    "0", "false", "no", "off",
+}
+
 # --- Integration adapter backends ---------------------------------------------
-# Every adapter in `provenance/integrations/` defaults to the JSON fixtures under
-# seed/mock_integrations: offline, deterministic, no credentials. Filling in an
-# adapter's variables below switches *that* adapter to its live API; the others keep
-# using fixtures. Any live call that fails or returns nothing falls back to the
-# fixture, so a half-configured environment degrades rather than breaks.
+# Which credentials each adapter needs to answer for real. They are only consulted
+# when USE_MOCK_DATA is False; an adapter whose variables are blank then returns
+# nothing rather than reaching for a fixture.
 #
 # NB: SENTRY_DSN above is unrelated -- that is where we *send* our own traces.
 # SENTRY_API_TOKEN below is what we *read* issues with.
@@ -58,11 +72,38 @@ JIRA_BASE_URL = os.environ.get("JIRA_BASE_URL", "").strip().rstrip("/")
 JIRA_EMAIL = os.environ.get("JIRA_EMAIL", "").strip()
 JIRA_TOKEN = os.environ.get("JIRA_TOKEN", "").strip()
 
+
+class MissingCredentials(RuntimeError):
+    pass
+
+
+def require_live_integrations() -> None:
+    """Refuse to boot a live deployment with no forge behind it (18 row 1).
+
+    Jira and Sentry stay optional: a PR with no ticket and no incident is an ordinary
+    outcome the graph already handles. GitHub is not optional, because with
+    USE_MOCK_DATA off it is the only thing that can put a title, an author or a merge
+    date on the PR chain -- without it every PR node is a bare number.
+    """
+    if USE_MOCK_DATA or (GITHUB_TOKEN and GITHUB_REPO):
+        return
+    raise MissingCredentials(
+        "USE_MOCK_DATA is false but GITHUB_TOKEN / GITHUB_REPO are not set.\n"
+        "  add both to .env, or set USE_MOCK_DATA=true to run on the seed fixtures"
+    )
+
 # These run on the request path inside `resolve_graph`, so the timeout is deliberately
 # short: a slow tracker should cost the answer one enrichment, not the whole request.
 INTEGRATION_TIMEOUT_SECONDS = 4.0
 INTEGRATION_CACHE_TTL_SECONDS = 300      # successful lookups
 INTEGRATION_FAILURE_COOLDOWN_SECONDS = 60  # don't re-dial an API that just failed
+
+# --- git history ---------------------------------------------------------------
+# `git log -L` walks every commit that ever touched the selected lines, not just the
+# ones still owning them. It runs on the request path and its cost grows with the
+# depth of the file's history, so the walk is capped. 25 is far past any range a
+# person selects by hand and still bounds the worst case on a much-edited file.
+GIT_HISTORY_MAX_COMMITS = 25
 
 # --- Models ------------------------------------------------------------------
 DENSE_MODEL = "text-embedding-3-small"

@@ -109,10 +109,14 @@ function truncate(value: string, limit: number): string {
   return flat.length <= limit ? flat : `${flat.slice(0, limit - 1)}…`;
 }
 
-/** The sources disagree on date format: `YYYY-MM-DD` from git blame and from the
- *  Slack export, full ISO-8601 from the GitHub and Sentry adapters. */
+/** `ts` is unix seconds, resolved server-side so both sides order identically; the
+ *  string fields are the fallback for a node the backend could not date. Those
+ *  disagree on format: `YYYY-MM-DD` from git blame and from the Slack export, full
+ *  ISO-8601 from the GitHub and Sentry adapters. */
 function timestampOf(node: GraphNode): number | null {
   const data = node.data ?? {};
+  const seconds = data.ts;
+  if (typeof seconds === 'number' && Number.isFinite(seconds)) { return seconds * 1000; }
   for (const key of ['date', 'merged_at', 'first_seen', 'commit_date', 'created_at']) {
     const raw = data[key];
     if (typeof raw !== 'string' || !raw) { continue; }

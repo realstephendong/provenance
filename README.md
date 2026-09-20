@@ -53,6 +53,8 @@ For the extension: `make extension`, then open `extension/` in VS Code and press
   signal. If you need to work without network access, the parts that make zero LLM
   calls are `service/gitctx.py`, the exact retrieval tier, `service/graph.py`, and
   the extension and CLI rendering layers.
+- **`USE_MOCK_DATA` defaults to `true`**, which is what makes the quick start above
+  need no credentials at all. See [Mock or real](#mock-or-real).
 - **`SENTRY_DSN` is optional.** Unset, `observability.py` no-ops every call.
 - **`SLACK_USER_TOKEN` is only needed for live Slack** — see [Connecting to Slack](#connecting-to-slack).
   The seed demo needs no Slack account. **`SLACK_BOT_TOKEN` / `SLACK_APP_TOKEN` are
@@ -65,7 +67,7 @@ For the extension: `make extension`, then open `extension/` in VS Code and press
 
 ```
 POST /context
-  ├─ git.blame      ─┐  concurrent
+  ├─ git.blame      ─┐  concurrent   + `git log -L`: the range's full history
   ├─ query_build    ─┘  code → engineering prose (LLM) + symbols (regex)
   ├─ retrieve          exact tier (PR/SHA/path) + semantic tier (kNN ⊕ BM25, RRF)
   │                    └─ null threshold: short-circuit before spending rerank tokens
@@ -87,9 +89,87 @@ Those six names are also the Sentry span names, so the trace matches the diagram
 3. **Structural evidence outranks inferred evidence, unconditionally.** If git proves
    a commit belongs to PR #4821 and a Slack thread names PR #4821, that relationship
    is asserted, not scored. If the reranker calls it irrelevant, it is kept anyway.
+   This extends backwards in time: `git log -L` walks every commit that ever touched
+   the selected lines, not just the ones still owning them, so the PR behind a value
+   that has since been replaced is on the map too — carrying a `SUPERSEDES` edge, so
+   its thread reads as settled history rather than as a live constraint.
 4. **The system says "no relevant context" rather than fabricate one.** Enforced
    independently at three layers: the retrieval null threshold, the rerank pass, and
    the synthesis prompt.
+
+---
+
+## Mock or real
+
+One flag decides whether the whole system runs on the seed corpus or on your actual
+systems:
+
+```bash
+USE_MOCK_DATA=true    # default: fixture PRs/tickets/incidents, Slack from an export
+USE_MOCK_DATA=false   # GitHub, Jira and Sentry for real; ingest defaults to live Slack
+```
+
+| | `true` | `false` |
+|---|---|---|
+| GitHub / Jira / Sentry | `seed/mock_integrations/*.json` | their live APIs |
+| `python -m provenance.ingest` default source | `--source export` | `--source slack` |
+| [The Slack bot](#the-slack-bot) | always live Slack -- it indexes a real conversation either way | |
+| Credentials needed | none beyond `OPENAI_API_KEY` | `GITHUB_TOKEN` + `GITHUB_REPO`; Jira and Sentry optional |
+
+**The two backends never mix.** With the flag off there is no fixture fallback: an
+adapter with no credentials, or one whose API is down, contributes *no node* rather
+than a fabricated one. Answering a real repository's PR with a seed fixture's title
+would invent the one thing this tool exists to establish — and a PR with no ticket
+and no incident is an outcome the graph already draws correctly.
+
+Jira and Sentry stay optional because of that. GitHub does not: with it unset the
+service refuses to boot, since nothing else can put a title, an author or a merge date
+on the PR chain, and every PR node would render as a bare number.
+
+### Connecting Sentry
+
+Two different things share the name, and they are unrelated:
+
+| | What it is | Variable |
+|---|---|---|
+| **Sending** | Provenance's own traces — the six span names in the diagram above | `SENTRY_DSN` |
+| **Reading** | the incidents the analysed repo's code caused, which become graph nodes | `SENTRY_API_TOKEN`, `SENTRY_ORG`, `SENTRY_PROJECT` |
+
+Reading is the interesting one, because "which incidents did PR #4821 cause" is not a
+relation Sentry models. The fixtures fake it with a `pr_number` field. Live, it is
+resolved through the one identifier GitHub and Sentry already share:
+
+```
+PR #4821  --GitHub-->  merge_commit_sha  --Sentry-->  firstRelease:<sha>
+```
+
+That works only if the repository being analysed names its Sentry releases after the
+merge commit they shipped. [`getsentry/action-release`](https://github.com/getsentry/action-release)
+does by default, so the requirement is one workflow in *that* repo, not in this one:
+
+```yaml
+- uses: actions/checkout@v4
+  with: { fetch-depth: 0 }        # action-release needs history; depth 1 fails
+- uses: getsentry/action-release@v3
+  env:
+    SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+    SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
+    SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
+  with:
+    set_commits: auto             # attaches the PR's commits to the release
+```
+
+A complete, working version of that workflow — plus the SDK wiring it needs — lives in
+[Awais-H/provenance-test](https://github.com/Awais-H/provenance-test), the repo this
+demo analyses in live mode.
+
+Then here: `SENTRY_API_TOKEN` (scopes `event:read`, `org:read`), `SENTRY_ORG`,
+`SENTRY_PROJECT`, and `GITHUB_TOKEN` / `GITHUB_REPO` — GitHub is part of the chain, so
+incidents need it even though Sentry is nominally independent.
+
+Version releases some other way (semver, a build number) and this finds *nothing*
+rather than something wrong. The one function to change is `_release_for_pr` in
+`provenance/integrations/sentry_issues.py`.
 
 ---
 
@@ -117,8 +197,9 @@ failed read (a Slack outage, a rate limit) leaves the index as it was.
 
 Ingest has two sources: a static export directory (`--source export`, the seed demo
 above) and the live Slack channel (`--source slack`, next section). Both feed the same
-pipeline. Still **not** built: an OAuth login flow and an Events API webhook receiver —
-you paste a token, and `--mode incremental` / `--mode reconcile` are the sync mechanism.
+pipeline, and which one is the default follows `USE_MOCK_DATA`. Still **not** built: an
+OAuth login flow and an Events API webhook receiver — you paste a token, and
+`--mode incremental` / `--mode reconcile` are the sync mechanism.
 
 ---
 
@@ -349,7 +430,7 @@ provenance/
   models.py          the frozen contract shared by all four surfaces
   llm.py             the only module that calls OpenAI
   observability.py   Sentry, no-op when unconfigured
-  integrations/      mocked GitHub / tickets / incidents, as real adapter interfaces
+  integrations/      GitHub / tickets / incidents: fixtures or live, one adapter each
   ingest/            Slack -> Elasticsearch, three batch modes
   slackbot/          the on-demand bot: one conversation, indexed from Slack
   service/           the live /context pipeline
@@ -360,16 +441,18 @@ seed/                deterministic demo corpus generator
 evals/               the eval harness
 ```
 
-External systems beyond git and Slack are mocked — but as **real adapter interfaces
-with fake data behind them**, not special-cased inline logic. Every one exposes
-`lookup_by_pr(pr_number)`. Swapping in a live API means replacing one function body;
-no caller changes.
+External systems beyond git and Slack ship **mocked by default** — but as real adapter
+interfaces with fixture data behind them, not special-cased inline logic. Every one
+exposes `lookup_by_pr(pr_number)`, and `USE_MOCK_DATA=false` switches all of them to
+their live APIs at once. No caller changes either way; see
+[Mock or real](#mock-or-real).
 
 ## Non-goals
 
 A Slack OAuth login flow and Events API webhooks (live Slack is read with a pasted user
-token instead); per-user filtering on a shared index; a channel-approval UI; real
-GitHub/ticket/error-tracker APIs (mocked by design, not by omission); multi-repository
+token instead); per-user filtering on a shared index; a channel-approval UI; MCP-client
+connectors for the trackers (they are plain REST adapters behind `USE_MOCK_DATA`);
+multi-repository
 support; auth on the FastAPI service; embedding-based topic-shift segmentation;
 an offline/fake-LLM mode; a second retrieval implementation for the terminal or MCP
 path; production-scale reconciliation sharding; fuzzy cross-source identity resolution

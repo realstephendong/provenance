@@ -42,6 +42,8 @@ export interface CommitInfo {
   lines: number;
   pr_number: number | null;
   dominant: boolean;
+  /** False = these lines were overwritten by a later commit in the chain. */
+  current: boolean;
 }
 
 export interface BlameInfo {

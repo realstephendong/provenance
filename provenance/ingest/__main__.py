@@ -6,8 +6,11 @@
 
     python -m provenance.ingest --source slack --mode backfill [--recreate]   # live Slack
 
-`--source export` (default) reads a Slack export directory; `--source slack` reads the
-live channel with the token in `.env` and refuses to start unless that token can read it.
+`--source export` reads a Slack export directory; `--source slack` reads the live
+channel with the token in `.env` and refuses to start unless that token can read it.
+Which one is the default follows `USE_MOCK_DATA`, so flipping that one flag switches
+the whole system between the seed demo and a real workspace; `--source` still wins
+when passed explicitly.
 
 All modes share one pipeline (segment -> extract -> summarize -> embed -> load) and
 differ only in which units they feed it. Because `load.point_id` is deterministic,
@@ -254,9 +257,11 @@ def _slack_source() -> Loader:
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="python -m provenance.ingest", description=__doc__)
-    parser.add_argument("--source", default="export", choices=["export", "slack"],
+    default_source = "export" if config.USE_MOCK_DATA else "slack"
+    parser.add_argument("--source", default=default_source, choices=["export", "slack"],
                         help="export = a Slack export directory; slack = the live channel "
-                             "(needs SLACK_USER_TOKEN in .env)")
+                             "(needs SLACK_USER_TOKEN in .env). "
+                             f"Default follows USE_MOCK_DATA, currently {default_source!r}.")
     parser.add_argument("--export", help="path to the Slack export directory (--source export)")
     parser.add_argument("--mode", default="backfill", choices=["backfill", "incremental", "reconcile"])
     parser.add_argument("--recreate", action="store_true",
