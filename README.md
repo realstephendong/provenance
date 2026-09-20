@@ -24,7 +24,69 @@ None of the three contains its own retrieval logic. They all consume the identic
 
 ---
 
-## Quick start
+## Quick start: `provenance-start`
+
+One command brings everything up (Windows, macOS and Linux; needs Node 20+, Docker,
+Python 3.12+ and the VS Code `code` command):
+
+```bash
+cp .env.example .env     # add OPENAI_API_KEY (the only required value)
+npm link                 # once: puts `provenance-start` on your PATH
+cd /path/to/any/git/repo
+provenance-start         # starts everything, then opens VS Code on this folder
+```
+
+After `npm link`, open a new terminal so the command is on `PATH` (on Windows it lands in
+`%APPDATA%\npm`). If you use a Node version manager (nvm-windows, fnm, Volta), global
+commands are per Node version: run `npm link` again after switching.
+
+What it does, in order. Each step checks whether its work is already done, so a re-run
+takes seconds:
+
+| Step | Skipped when |
+|---|---|
+| Configuration: reads `provenance/.env`, fails at once if `OPENAI_API_KEY` is empty | never (instant) |
+| Elasticsearch: starts Docker Desktop if needed, `docker compose up -d`, waits for health | ES already answers |
+| Python: creates `.venv`, `pip install -r requirements.txt` | `.venv` exists and `requirements.txt` is unchanged |
+| Ingest: live Slack if `SLACK_USER_TOKEN` is set, otherwise the seed demo data | `.provenance/ingest_checkpoint.json` exists and the index has documents |
+| Extension: `npm install`, compile, package a `.vsix`, `code --install-extension` | source unchanged and already installed |
+| API service: `uvicorn` on `127.0.0.1:8000`, detached, waits for `/health` | a healthy Provenance service already answers |
+| Open VS Code on the directory you ran the command from | `--no-open` |
+
+```bash
+provenance-start --no-open    # everything except opening VS Code
+provenance-start --logs       # follow the API service log (Ctrl-C leaves the service running)
+provenance-start --reingest   # drop and rebuild the index (spends OpenAI tokens)
+provenance-start --stop       # stop the service and the Elasticsearch container
+provenance-start --help
+```
+
+Things to know:
+
+- **The first run spends tokens.** Ingest sends every thread to OpenAI (embeddings and
+  summaries), from live Slack when `SLACK_USER_TOKEN` is set, from the seed data otherwise.
+  It happens once; later runs skip it while the ingest checkpoint exists and the index has
+  documents. A failed live-Slack ingest stops the launcher; it never falls back to seed
+  data. To use the seed data, leave `SLACK_USER_TOKEN` blank.
+- **New Slack messages are the Slack bot's job, not the launcher's.** `provenance-start`
+  only backfills once. The bot must write through the `provenance.ingest` pipeline into the
+  `slack_threads` index using the current embedder (`text-embedding-3-small:1536`);
+  `/health` fails on an embedder mismatch. The service reads the index live, so new
+  documents show up without a restart.
+- **Only `provenance/.env` (and real environment variables) are read.** A `.env` in the
+  folder you run the command from is ignored: it belongs to the repo you're inspecting.
+  Environment variables win over `.env`, like `load_dotenv()`.
+- **Changed `.env` or pulled new code?** A running service keeps the old settings. Run
+  `provenance-start --stop`, then `provenance-start`.
+- **Files it writes** (all under `.run/`, gitignored): `service.log`, `service.pid`,
+  `launcher.log` (everything the launcher printed) and `state.json` (hashes that let it
+  skip work).
+- **Overrides:** `PROVENANCE_PYTHON` (interpreter), `PROVENANCE_CODE_BIN` (path to the
+  `code` launcher, e.g. for Insiders/VSCodium), `PROVENANCE_SERVICE_URL` (port; the
+  extension's `provenance.serviceUrl` must match).
+- **Tests:** `npm test` runs the launcher's unit tests.
+
+### Manual steps (macOS/Linux with `make`)
 
 ```bash
 make install          # python3.12 venv + deps   (override: make install PYTHON=python3.13)

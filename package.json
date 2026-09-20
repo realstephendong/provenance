@@ -1,0 +1,15 @@
+{
+  "name": "provenance-launcher",
+  "version": "1.0.0",
+  "private": true,
+  "description": "One-command startup for Provenance: provenance-start",
+  "bin": {
+    "provenance-start": "bin/provenance-start.js"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
