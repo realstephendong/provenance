@@ -273,7 +273,10 @@ async def run_reconcile(source: Loader, say: Say = print) -> dict:
     written = await process_units(es, units_to_reprocess, say)
 
     for doc_id in stale:
-        es.delete(index=config.INDEX, id=doc_id, ignore_status=404)
+        # elasticsearch-py v8 expects transport options on a derived client, not
+        # as keyword arguments to the endpoint method. A document can disappear
+        # between scroll and delete, which is benign during reconciliation.
+        es.options(ignore_status=404).delete(index=config.INDEX, id=doc_id)
     if stale:
         say(f"  deleted {len(stale)} stale documents")
     return {"mode": "reconcile", "missing": len(missing), "changed": len(changed),
