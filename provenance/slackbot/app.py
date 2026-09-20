@@ -1,7 +1,8 @@
 """The Slack bot: index a conversation into Provenance from inside Slack.
 
-It runs over Socket Mode, so it needs no public URL and no tunnel -- the process dials
-out to Slack from your machine and writes straight to your local Elasticsearch.
+It runs over Socket Mode, so it needs no public URL and no tunnel. Deploy one copy
+with the workspace bot token and a shared Elasticsearch; every member can use that
+one installation.
 
 Two triggers, one code path:
 
@@ -28,7 +29,7 @@ import threading
 import time
 
 from .. import config
-from ..ingest import load, slack_check, slack_live
+from ..ingest import load, slack_live
 from ..ingest.slack_client import SlackClient, SlackError
 from . import index_thread
 from .index_thread import Candidate, IndexedThread, IndexUnavailable, NotFound
@@ -36,7 +37,7 @@ from .index_thread import Candidate, IndexedThread, IndexUnavailable, NotFound
 log = logging.getLogger("provenance.slackbot")
 
 MISSING_TOKENS_HELP = """\
-The Slack bot needs two tokens the read-only ingest path does not.
+The workspace bot needs two tokens.
 
   1. Update your Slack app from slack_app_manifest.yml
      (https://api.slack.com/apps -> your app -> App Manifest), then reinstall it.
@@ -47,9 +48,6 @@ The Slack bot needs two tokens the read-only ingest path does not.
   3. From "Basic Information" -> "App-Level Tokens", make a token with the
      `connections:write` scope and copy it (xapp-...):
         SLACK_APP_TOKEN=xapp-...
-  4. Reinstalling also reissues your *User* OAuth Token -- copy the new xoxp-... into
-     SLACK_USER_TOKEN, or live ingest stops working.
-
 Full steps: "The Slack bot" in README.md."""
 
 
@@ -95,16 +93,16 @@ def run_async(coro):
 
 # --- shared clients ------------------------------------------------------------------
 
-_user_client: SlackClient | None = None
+_bot_client: SlackClient | None = None
 _es = None
 
 
-def user_client() -> SlackClient:
-    """The read-only user token, shared. `httpx.Client` is thread-safe."""
-    global _user_client
-    if _user_client is None:
-        _user_client = SlackClient(config.SLACK_USER_TOKEN)
-    return _user_client
+def bot_client() -> SlackClient:
+    """The installed workspace bot's client. `httpx.Client` is thread-safe."""
+    global _bot_client
+    if _bot_client is None:
+        _bot_client = SlackClient(config.SLACK_BOT_TOKEN)
+    return _bot_client
 
 
 def es_client():
@@ -221,9 +219,9 @@ def _index_and_report(respond, channel_id: str, target_ts: str) -> None:
             replace_original=True)
     try:
         indexed = run_async(
-            index_thread.index_at(es_client(), user_client(), channel_id, target_ts)
+            index_thread.index_at(es_client(), bot_client(), channel_id, target_ts)
         )
-    except (NotFound, IndexUnavailable) as exc:
+    except (NotFound, IndexUnavailable, index_thread.ChannelNotAllowed) as exc:
         respond(text=f":x: {exc}", replace_original=True)
         return
     except SlackError as exc:
@@ -264,10 +262,11 @@ def register(app) -> None:
             return
 
         try:
+            index_thread.require_allowed_channel(command["channel_id"])
             candidates = index_thread.recent_candidates(
-                user_client(), command["channel_id"], config.SLACK_BOT_PICKER_LIMIT
+                bot_client(), command["channel_id"], config.SLACK_BOT_PICKER_LIMIT
             )
-        except (NotFound, SlackError) as exc:
+        except (NotFound, index_thread.ChannelNotAllowed, SlackError) as exc:
             respond(text=f":x: Couldn't read this channel's history ({exc}).")
             return
 
@@ -309,29 +308,29 @@ def _preflight() -> None:
     `config.SLACK_WORKSPACE`, which defaults to the `acme` placeholder until
     `auth.test` overwrites it. Skip this and every permalink the bot writes 404s.
     """
-    if not config.SLACK_USER_TOKEN:
-        sys.exit(slack_check.NO_TOKEN_HELP)
     if not config.SLACK_BOT_TOKEN or not config.SLACK_APP_TOKEN:
         sys.exit(MISSING_TOKENS_HELP)
+    if not config.SLACK_BOT_CHANNEL_IDS:
+        sys.exit("SLACK_BOT_CHANNEL_IDS is empty. Set it to the channel IDs the shared bot may index.")
     try:
         config.require_api_key()
     except config.MissingAPIKey as exc:
         sys.exit(str(exc))
 
-    print("checking Slack access...")
-    report = slack_check.check_access(
-        user_client(), config.SLACK_TEAM_ID, config.SLACK_CHANNEL_IDS
-    )
-    if report.error:
-        sys.exit("\n".join(slack_check.verdict_lines(report)))
-    slack_live.apply_workspace(report.workspace_url)
-
-    # A channel-level failure is only a warning here. Batch ingest needs every
-    # configured channel; the bot indexes whichever channel it is invoked from, which
-    # may not be a configured one at all.
-    for channel in report.channels:
-        if not channel.ok:
-            print(f"  ! #{channel.name or channel.channel_id}: {channel.reason}")
+    print("checking workspace bot...")
+    try:
+        auth = bot_client().call("auth.test")
+    except SlackError as exc:
+        sys.exit(f"Slack rejected SLACK_BOT_TOKEN ({exc.code}). Reinstall the workspace app and update it.")
+    team_id = auth.get("team_id", "")
+    if config.SLACK_TEAM_ID and team_id != config.SLACK_TEAM_ID:
+        sys.exit(
+            f"SLACK_BOT_TOKEN is for workspace {team_id}, but SLACK_TEAM_ID is "
+            f"{config.SLACK_TEAM_ID}. Install the app in the intended workspace."
+        )
+    slack_live.apply_workspace(auth.get("url", ""))
+    print(f"  bot valid: @{auth.get('user', '?')} in {auth.get('team', team_id)}")
+    print(f"  allowed channels: {', '.join(config.SLACK_BOT_CHANNEL_IDS)}")
     print(f"  permalinks -> {config.SLACK_WORKSPACE}.slack.com")
 
 

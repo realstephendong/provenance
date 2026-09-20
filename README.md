@@ -273,8 +273,10 @@ on demand, from inside Slack** — so a discussion that finished two minutes ago
 already be matched against code you are about to write. That is the live loop: talk it
 through in Slack, index the thread, write the code, select it, see the thread come back.
 
-It runs over **Socket Mode**, so it needs no public URL and no tunnel — the process
-dials out to Slack from your machine and writes straight to your local Elasticsearch.
+This is a **single workspace app**, not one app or user token per person. Install it
+once, run one long-lived bot process against the team's shared Elasticsearch and
+Provenance service, and every member can invoke it in an approved channel. It uses
+Socket Mode, so the hosted process needs no public inbound URL or tunnel.
 
 **Two ways to trigger it**
 
@@ -288,22 +290,77 @@ Un-threaded conversations work too. `/provenance` re-segments recent history wit
 same burst rule the batch ingest uses, so a run of messages straight in the channel is
 offered as one conversation and indexed as one unit.
 
-**Setup** (on top of [Connecting to Slack](#connecting-to-slack))
+**Workspace-admin setup**
 
-1. Paste [`slack_app_manifest.yml`](slack_app_manifest.yml) into your app's **App
-   Manifest** page and **reinstall**. It adds a bot user, Socket Mode, the
-   `/provenance` command and the message shortcut.
-2. Copy three values into `.env` — reinstalling reissues the user token, so re-copy
-   that one even if you already had it:
+1. In the target workspace, create or update the internal Slack app from
+   [`slack_app_manifest.yml`](slack_app_manifest.yml), then **install it to the
+   workspace**. An admin approval may be required. The manifest grants the bot the
+   read scopes it needs; no member needs to create an app or supply a user token.
+2. Put two app secrets in the hosted bot's secret manager (or its `.env`):
 
    ```bash
-   SLACK_USER_TOKEN=xoxp-...   # OAuth & Permissions -> User OAuth Token
    SLACK_BOT_TOKEN=xoxb-...    # OAuth & Permissions -> Bot User OAuth Token
    SLACK_APP_TOKEN=xapp-...    # Basic Information -> App-Level Tokens (connections:write)
+   SLACK_BOT_CHANNEL_IDS=C0123ABC,C0456DEF
    ```
 
-3. `make slackbot`. It verifies the tokens before accepting a single command, and
-   prints which workspace permalinks will point at.
+   `SLACK_BOT_CHANNEL_IDS` is mandatory policy, not a convenience setting: include
+   only channels whose content may enter the shared index. To permit every *public*
+   channel, set `SLACK_BOT_CHANNEL_IDS=*`; the bot joins each public channel the first
+   time somebody uses it there. For a private channel, invite Provenance in Slack
+   before it can be indexed.
+3. Run `make slackbot` as a durable service next to the shared Elasticsearch and
+   Provenance API. It verifies the workspace bot token before accepting commands.
+   Keep `OPENAI_API_KEY`, the bot tokens, and Elasticsearch private to that service;
+   do not run a separate copy on each developer laptop.
+
+To add a new channel later: invite Provenance (if private), append its channel ID to
+`SLACK_BOT_CHANNEL_IDS`, and restart the bot deployment. Members can then use the
+message shortcut or slash command immediately. With `SLACK_BOT_CHANNEL_IDS=*`, no
+restart is needed for new public channels; private channels still require an invite.
+
+### Deploying the shared Slack bot
+
+On one always-on team host with Docker installed, this is the entire launch command:
+
+```bash
+cp .env.example .env       # first time only; fill in the secrets below
+make deploy
+```
+
+Set these values in `.env` before the first launch:
+
+```bash
+OPENAI_API_KEY=...
+USE_MOCK_DATA=false
+SLACK_BOT_TOKEN=xoxb-...
+SLACK_APP_TOKEN=xapp-...
+SLACK_BOT_CHANNEL_IDS=C0123ABC,C0456DEF
+GITHUB_TOKEN=...
+GITHUB_REPO=your-org/your-repo
+```
+
+`make deploy` starts a persistent shared Elasticsearch index, the Provenance API, and
+the Socket Mode bot. Check it with `make deploy-logs`; stop it with `make deploy-down`
+(the indexed data remains in Docker's named volume). This command is safe to run again
+after changing `.env` or code; Docker rebuilds/restarts the affected services.
+
+`USE_MOCK_DATA=false` is required for a real team deployment. The API then requires
+the GitHub token and repository shown above; otherwise it refuses to start instead of
+mixing live Slack conversations with demo PR metadata. If you only want to smoke-test
+the container setup, leave the default `USE_MOCK_DATA=true` temporarily.
+
+To enable all public Slack channels instead, set `SLACK_BOT_CHANNEL_IDS=*` and run
+`make deploy` after updating the app manifest/reinstalling it. This grants broad
+indexing access; only do it when the shared retrieval service has the same audience as
+those public channels. Slack does not let a bot self-join private channels, so a member
+must invite Provenance to each private channel that should be indexed.
+
+The API binds to `127.0.0.1:8000` by default. That is intentional: this project does
+not yet authenticate `/context`, so do not set `PROVENANCE_API_BIND=0.0.0.0:8000` or
+publish it to the internet. To let teammates' extensions use the shared retrieval
+service, put it behind your company's authenticated HTTPS reverse proxy or private
+network gateway, then set their `PROVENANCE_SERVICE_URL` to that protected URL.
 
 **Getting an exact match, not a hopeful one**
 
@@ -331,13 +388,14 @@ same conversation. They overwrite each other; neither duplicates.
 
 **Limits worth knowing**
 
-- Reads use `SLACK_USER_TOKEN`, so the bot sees exactly what you see. The bot token
-  only carries command plumbing, and replies go over each interaction's
-  `response_url` — it never posts into a channel.
+- Reads and the :pushpin: reaction use the workspace bot token. A member cannot use
+  the app to index a channel outside `SLACK_BOT_CHANNEL_IDS`; the bot tells them how
+  to request access. Slack still requires the bot to be invited to private channels.
+- The shared index is not per-user access controlled. Do not allow private or
+  sensitive channels unless the shared Provenance API and Elasticsearch have matching
+  access controls.
 - The picker reads one page of history (`SLACK_BOT_HISTORY_MESSAGES`, 200 messages,
   never paginated). It answers "what was just being talked about", not "search".
-- Indexing a conversation in a channel outside `SLACK_CHANNEL_IDS` works, and the reply
-  warns you that a full re-ingest won't cover it.
 
 ---
 

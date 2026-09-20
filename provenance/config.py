@@ -224,13 +224,26 @@ SLACK_PAGE_SIZE = 200
 # Mode, so it needs no public URL -- but Socket Mode needs two tokens the read-only
 # ingest path does not:
 #
-#   SLACK_BOT_TOKEN (xoxb-)  the app's bot user; carries the command plumbing
+#   SLACK_BOT_TOKEN (xoxb-)  the app's bot user; reads allowed conversations and
+#                            handles command plumbing
 #   SLACK_APP_TOKEN (xapp-)  the app-level token that opens the socket
 #
-# Reading the conversation still goes through SLACK_USER_TOKEN, so the bot can only
-# see what you can see. Blank tokens = the bot is off; nothing else changes.
+# The installed workspace bot reads conversations with SLACK_BOT_TOKEN.  Keep its
+# reach deliberately narrow: only channels listed here may be added to the shared
+# index. Set this to `*` to allow every public channel; private channels still need a
+# manual invitation in Slack. This is separate from SLACK_CHANNEL_IDS, which is for a
+# person's optional bulk ingest. Defaulting to the latter preserves the single-channel
+# setup while preventing a shortcut in an arbitrary (possibly private) channel from
+# publishing its contents to the shared index.
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "").strip()
 SLACK_APP_TOKEN = os.environ.get("SLACK_APP_TOKEN", "").strip()
+SLACK_BOT_CHANNEL_IDS = [
+    c.strip()
+    for c in os.environ.get(
+        "SLACK_BOT_CHANNEL_IDS", ",".join(SLACK_CHANNEL_IDS)
+    ).split(",")
+    if c.strip()
+]
 # Must match the command declared in slack_app_manifest.yml.
 SLACK_BOT_COMMAND = os.environ.get("SLACK_BOT_COMMAND", "/provenance").strip()
 SLACK_BOT_SHORTCUT = "index_thread"      # the message shortcut's callback_id
