@@ -883,22 +883,32 @@ const STYLES = `
   .graph-svg .node .accent { opacity: 0.95; stroke: none; }
   .graph-svg .node { cursor: pointer; transition: opacity 120ms ease; }
   .graph-svg .node:hover .card, .graph-svg .node:focus .card,
-  .graph-svg .node.active .card { stroke: var(--vscode-focusBorder); stroke-width: 2; }
+  .graph-svg .node.active .card, .graph-svg .node.selected .card {
+    stroke: var(--vscode-focusBorder); stroke-width: 2;
+  }
   .graph-svg .node.dimmed, .graph-svg .chip-node.dimmed { opacity: 0.25; }
-  .graph-svg .node.selected .card { stroke: var(--vscode-textLink-foreground); stroke-width: 2.5; }
   .graph-svg .node.linkable:hover .node-label { text-decoration: underline; }
 
-  /* The card's hover action. Hidden at rest, so a column of cards stays quiet and
-     the corner is not another thing to read; shown for the card under the pointer,
-     the focused card, and the active one -- a :hover-only rule would put it out of
-     reach of the keyboard. */
-  .graph-svg .node-open { opacity: 0; transition: opacity 120ms ease; }
-  .graph-svg .node:hover .node-open, .graph-svg .node:focus .node-open,
-  .graph-svg .node.active .node-open, .graph-svg .node.selected .node-open { opacity: 1; }
-  .graph-svg .node-open rect { fill: var(--vscode-button-secondaryBackground, #3a3d41); stroke: none; }
-  .graph-svg .node-open text { font-size: 9px; font-weight: 600; text-anchor: middle;
+  /* The card's action, shown only for the card the pointer is actually on.
+     Deliberately not '.active': hovering one card marks everything it connects to
+     active, and an Open button on four cards at once says nothing about which one
+     is about to open. Not '.selected' either -- that outlives the pointer.
+     ':focus-visible' rather than ':focus' is the same rule for the keyboard: it
+     follows the tab ring, where ':focus' would also latch on to the last card
+     clicked and leave its button showing under the mouse's nose.
+     It is untouchable while invisible, so the corner of a card that is not being
+     hovered is still the card. */
+  .graph-svg .node-open { opacity: 0; pointer-events: none; transition: opacity 100ms ease; }
+  .graph-svg .node:hover .node-open, .graph-svg .node:focus-visible .node-open {
+    opacity: 1; pointer-events: all;
+  }
+  .graph-svg .node-open .open-bg { fill: var(--vscode-button-secondaryBackground, #3a3d41);
+                                   stroke: var(--vscode-panel-border); stroke-width: 1; }
+  .graph-svg .node-open text { font-size: 9px; font-weight: 600; letter-spacing: 0.02em;
+                               text-anchor: middle; dominant-baseline: central;
                                fill: var(--vscode-button-secondaryForeground, #cccccc); }
-  .graph-svg .node-open:hover rect { fill: var(--vscode-button-background, #0078d4); }
+  .graph-svg .node-open:hover .open-bg { fill: var(--vscode-button-background, #0078d4);
+                                         stroke: var(--vscode-button-background, #0078d4); }
   .graph-svg .node-open:hover text { fill: var(--vscode-button-foreground, #ffffff); }
 
   .graph-svg .n-code .accent, .graph-svg .n-code .node-glyph, .graph-svg circle.n-code { fill: var(--vscode-charts-blue, #4a9eff); }
@@ -1246,7 +1256,10 @@ const CLIENT_SCRIPT = `
       const data = node.data || {};
       const rows = Object.keys(data)
         .filter(function (key) {
-          return key !== 'permalink' && data[key] !== undefined && data[key] !== null && data[key] !== '';
+          // Citation is internal graph-to-evidence bookkeeping. It should make the
+          // link work, but it is not useful detail for someone inspecting a node.
+          return key !== 'permalink' && key !== 'citation' &&
+            data[key] !== undefined && data[key] !== null && data[key] !== '';
         })
         .map(function (key) {
           const value = Array.isArray(data[key]) ? data[key].join(', ') : data[key];
@@ -1284,21 +1297,21 @@ const CLIENT_SCRIPT = `
       if (citation) { focusEvidence(citation); }
     }
 
-    // The hover action, as opposed to the card body: take me to the thing itself.
-    // A permalink wins -- the thread in Slack, where the conversation actually is.
-    // Failing that, the evidence card this node is cited as, which is the nearest
-    // thing the panel holds. Failing that, the detail drawer, which is all there is.
+    // The hover action takes a cited node to its evidence card. That card contains
+    // the actual external link, so this preserves the page's reading flow and gives
+    // the user the surrounding context before they leave VS Code. Nodes without a
+    // citation still open their permalink directly when one is available.
     function openNode(el) {
       const node = parseNode(el);
       if (!node) { return; }
       const data = node.data || {};
-      if (typeof data.permalink === 'string' && data.permalink) {
-        vscodeApi.postMessage({ type: 'openLink', url: data.permalink });
+      const citation = el.getAttribute('data-citation');
+      if (citation && focusEvidence(citation)) {
         renderDetails(node);
         return;
       }
-      const citation = el.getAttribute('data-citation');
-      if (citation && focusEvidence(citation)) {
+      if (typeof data.permalink === 'string' && data.permalink) {
+        vscodeApi.postMessage({ type: 'openLink', url: data.permalink });
         renderDetails(node);
         return;
       }

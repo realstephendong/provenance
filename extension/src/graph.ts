@@ -156,6 +156,33 @@ function cardIcon(style: TypeStyle, x: number, cy: number): string {
             ${markPaths(style.brand)}</g>`;
 }
 
+/** The card's hover action. Sized to its own label rather than to the card, and
+ *  hung off the same right margin as the date above it so the two right-align into
+ *  one column. */
+const OPEN_W = 40;
+const OPEN_H = 16;
+const OPEN_RIGHT_MARGIN = 12;
+const OPEN_BOTTOM_MARGIN = 8;
+
+/** The action in the card's bottom-right corner, revealed on hover (CSS, in view.ts).
+ *  Every card carries one, so the gesture for "take me to the thing itself" is the
+ *  same everywhere. It replaces the old `[N] →` marker, which numbered Slack cards
+ *  after the evidence list -- a detail of this panel's layout, not of the thread --
+ *  and left every other card's corner empty. What it opens is decided at click time
+ *  from what the node carries: its permalink, else its evidence card, else its
+ *  detail drawer. */
+function openButton(cardW: number, y: number, height: number): string {
+  const x = CARD_X + cardW - OPEN_RIGHT_MARGIN - OPEN_W;
+  // Hung off the card's bottom edge rather than off a text row, so it lands in the
+  // same corner at the same inset whether or not the node has a subtitle.
+  const cy = y + height - OPEN_BOTTOM_MARGIN - OPEN_H / 2;
+  return `<g class="node-open" role="button" aria-label="Open">
+            <rect class="open-bg" x="${x}" y="${(cy - OPEN_H / 2).toFixed(2)}"
+                  width="${OPEN_W}" height="${OPEN_H}" rx="4" />
+            <text x="${x + OPEN_W / 2}" y="${cy.toFixed(2)}">Open</text>
+          </g>`;
+}
+
 /** The subpaths of a mark. A subpath with its own colour states it inline: a fill
  *  attribute on the path outranks the fill the group inherits from CSS. */
 function markPaths(brand: BrandKey): string {
@@ -581,13 +608,13 @@ export function renderGraph(graph: Graph, opts: RenderOptions = {}): string {
         <g class="node ${style.cssClass}${citation !== null ? ' linkable' : ''}"
            data-node-id="${escapeAttr(node.id)}" data-node-json='${payload}'
            ${citation !== null ? `data-citation="${citation}"` : ''} tabindex="0" role="button">
-          <rect x="${CARD_X}" y="${y}" width="${CARD_W}" height="${height}" rx="8" />
+          <rect class="card" x="${CARD_X}" y="${y}" width="${CARD_W}" height="${height}" rx="8" />
           <rect class="accent" x="${CARD_X}" y="${y}" width="4" height="${height}" rx="2" />
           ${cardIcon(style, CARD_X + 14, y + ICON_CY)}
           <text class="node-type" x="${CARD_X + 36}" y="${y + TYPE_BASELINE}">${escapeHtml(node.type)}</text>
           ${date ? `<text class="node-date" x="${CARD_X + CARD_W - 12}" y="${y + TYPE_BASELINE}">${escapeHtml(date)}</text>` : ''}
-          <text class="node-label" x="${CARD_X + 36}" y="${y + LABEL_BASELINE}">${escapeHtml(truncate(node.label, citation !== null ? 20 : 24))}</text>
-          ${citation !== null ? `<text class="node-cite" x="${CARD_X + CARD_W - 12}" y="${y + LABEL_BASELINE}">[${citation}] →</text>` : ''}
+          <text class="node-label" x="${CARD_X + 36}" y="${y + LABEL_BASELINE}">${escapeHtml(truncate(node.label, 20))}</text>
+          ${openButton(CARD_W, y, height)}
           ${subtitle ? `<text class="node-subtitle" x="${CARD_X + 14}" y="${y + 48}">${escapeHtml(truncate(subtitle, 28))}</text>` : ''}
         </g>
       </g>`;
