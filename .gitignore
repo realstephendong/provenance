@@ -4,6 +4,8 @@ __pycache__/
 # every local env file; .env.example is the one tracked template
 .env*
 !.env.example
+# Deployment-only credentials, such as a GitHub App private key.
+.secrets/
 .es_storage/
 # leftover from the pre-merge Qdrant build; safe to delete
 .qdrant_storage/

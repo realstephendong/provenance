@@ -1242,6 +1242,7 @@ const CLIENT_SCRIPT = `
     }
 
     const details = document.getElementById('node-details');
+    const INTERNAL_KEYS = new Set(['permalink', 'citation', 'external_url', 'external_label']);
     function escapeText(value) {
       const div = document.createElement('div');
       div.textContent = String(value);
@@ -1256,9 +1257,10 @@ const CLIENT_SCRIPT = `
       const data = node.data || {};
       const rows = Object.keys(data)
         .filter(function (key) {
-          // Citation is internal graph-to-evidence bookkeeping. It should make the
-          // link work, but it is not useful detail for someone inspecting a node.
-          return key !== 'permalink' && key !== 'citation' &&
+          // Internal bookkeeping, not detail for someone inspecting a node: the
+          // link keys are what the Open button reads, and citation is how the
+          // graph points back at an evidence card.
+          return !INTERNAL_KEYS.has(key) &&
             data[key] !== undefined && data[key] !== null && data[key] !== '';
         })
         .map(function (key) {
@@ -1266,14 +1268,18 @@ const CLIENT_SCRIPT = `
           return '<div class="nd-row"><span class="nd-key">' + escapeText(key) + '</span><span>' + escapeText(value) + '</span></div>';
         }).join('');
       const permalink = typeof data.permalink === 'string' ? data.permalink : '';
+      const externalUrl = typeof data.external_url === 'string' ? data.external_url : '';
+      const externalLabel = typeof data.external_label === 'string' ? data.external_label : 'Open externally';
+      const openUrl = externalUrl || permalink;
+      const openLabel = externalUrl ? externalLabel : 'Open in Slack';
       details.innerHTML =
         '<div class="nd-title"><strong>' + escapeText(node.type) + ': ' + escapeText(node.label) + '</strong></div>' +
         (rows || '<div class="nd-row muted">No further detail resolved for this node.</div>') +
-        (permalink ? '<div class="nd-open"><button id="nd-open-btn">Open externally ↗</button></div>' : '');
+        (openUrl ? '<div class="nd-open"><button id="nd-open-btn">' + escapeText(openLabel) + ' ↗</button></div>' : '');
       const openBtn = document.getElementById('nd-open-btn');
       if (openBtn) {
         openBtn.addEventListener('click', function () {
-          vscodeApi.postMessage({ type: 'openLink', url: permalink });
+          vscodeApi.postMessage({ type: 'openLink', url: openUrl });
         });
       }
     }

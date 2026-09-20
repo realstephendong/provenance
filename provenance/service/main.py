@@ -18,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .. import config, observability
 from ..ingest import load, sync
 from ..ingest.slack_client import SlackError
+from ..integrations import github
 from ..models import (
     BlameInfo, ContextRequest, ContextResponse, CountResponse, Result,
 )
@@ -202,13 +203,20 @@ def _to_results(hits: list[dict]) -> list[Result]:
 
 @app.post("/context", response_model=ContextResponse)
 async def context(req: ContextRequest) -> ContextResponse:
+    github.set_repository(req.github_repo)
     timings: dict[str, int] = {}
+    supplied_blame = (
+        BlameInfo.model_validate(req.precomputed_blame)
+        if req.precomputed_blame is not None else None
+    )
 
     # git blame is a subprocess and query_build is an LLM call -- neither needs the
     # other, so they overlap. blame goes to a thread so it does not block the loop.
     # Each gets its own span and its own timing entry; the two overlap in wall clock,
     # so they intentionally do not sum to the request total.
     async def _blame():
+        if supplied_blame is not None:
+            return supplied_blame
         with _timed(timings, "git.blame"):
             # with_history: the full `git log -L` walk of the range, so a PR the code
             # no longer reflects still reaches the graph -- marked as superseded
@@ -224,6 +232,19 @@ async def context(req: ContextRequest) -> ContextResponse:
             return await query_build.build_queries(req.code, req.file_path, req.language)
 
     blame, queries = await asyncio.gather(_blame(), _queries())
+
+    # A shared API cannot read a developer's checkout. When the extension supplied
+    # local blame, resolve its commit -> PR joins through the GitHub App instead.
+    if req.precomputed_blame:
+        for commit in blame.commits:
+            if commit.pr_number is None:
+                pr = github.lookup_by_sha(commit.sha)
+                if pr and isinstance(pr.get("number"), int):
+                    commit.pr_number = pr["number"]
+        blame.pr_numbers = list(dict.fromkeys(
+            c.pr_number for c in blame.commits if c.pr_number is not None
+        ))
+        blame.pr_number = blame.pr_numbers[0] if blame.pr_numbers else None
 
     try:
         with _timed(timings, "retrieve"):
@@ -302,6 +323,7 @@ async def context_count(req: ContextRequest) -> CountResponse:
     code-to-prose LLM call and queries on the symbols-only description instead. One
     cheap embedding per lens, rather than a chat completion plus an embedding.
     """
+    github.set_repository(req.github_repo)
     try:
         blame = await asyncio.to_thread(
             gitctx.blame, req.repo_root, req.file_path, req.line_start, req.line_end

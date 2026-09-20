@@ -61,12 +61,17 @@ def _headers() -> dict:
 
 
 def _normalize(issue: dict, pr_number: int | None = None) -> dict:
+    issue_id = issue.get("shortId") or issue.get("id")
+    permalink = issue.get("permalink")
+    if not permalink and config.SENTRY_ORG and issue_id:
+        permalink = f"{config.SENTRY_WEB_URL}/organizations/{config.SENTRY_ORG}/issues/{issue_id}/"
     return {
-        "id": issue.get("shortId") or issue.get("id"),
+        "id": issue_id,
         "title": issue.get("title"),
         "first_seen": issue.get("firstSeen"),
         "status": issue.get("status"),
         "pr_number": pr_number,
+        "url": permalink,
     }
 
 

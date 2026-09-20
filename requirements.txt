@@ -8,3 +8,4 @@ python-dotenv
 sentry-sdk[fastapi,openai]
 mcp
 slack_bolt>=1.18
+PyJWT[crypto]>=2.8
