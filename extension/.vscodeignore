@@ -1,0 +1,7 @@
+# The package ships compiled JS only: src/ and the maps are build inputs, and
+# node_modules holds nothing but the TypeScript toolchain (--no-dependencies).
+src/**
+out/**/*.map
+node_modules/**
+.vscode/**
+tsconfig.json
