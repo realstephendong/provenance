@@ -4,6 +4,17 @@
 export type MatchType = 'exact' | 'semantic';
 export type Confidence = 'exact' | 'llm-flagged';
 
+/**
+ * Which half of a Backfill press produced this.
+ *
+ * `workspace_shared` is the company index every teammate can search.
+ * `user_private` is a private channel indexed on this machine, which nobody else can
+ * retrieve. Rendered, not inferred: "who else can see this?" is the first thing
+ * someone needs to know about a quoted conversation, and a channel name does not
+ * answer it.
+ */
+export type RetrievalScope = 'workspace_shared' | 'user_private';
+
 export type NodeType =
   | 'Code' | 'Commit' | 'PullRequest' | 'SlackThread'
   | 'Ticket' | 'SentryIssue' | 'Person';
@@ -34,6 +45,8 @@ export interface Result {
   match_type: MatchType;
   score: number;
   raw_text: string;
+  scope: RetrievalScope;
+  display_scope: string;
 }
 
 export interface CommitInfo {
@@ -65,6 +78,8 @@ export interface GraphNode {
   type: NodeType;
   label: string;
   data: Record<string, unknown>;
+  scope: RetrievalScope;
+  display_scope: string;
 }
 
 export interface GraphEdge {
@@ -140,5 +155,39 @@ export interface IngestResult {
   covered_through: number | null;
   never_run: boolean;
   /** The progress lines the CLI would have printed, in order. */
+  log: string[];
+}
+
+/** `GET /v1/status` on the local connector. */
+export interface LocalStatus {
+  ok: boolean;
+  error?: string;
+  slack: {
+    signed_in: boolean;
+    reachable?: boolean;
+    user?: string;
+    team_name?: string;
+    client_mode?: string;
+  };
+  consent: { granted: boolean; version: string; text: string };
+  store: {
+    documents: number;
+    channels: number;
+    bytes: number;
+    profile_id: string;
+    path: string;
+    key_backend: string;
+  };
+  channels: { channel_id: string; channel_name: string; documents: number }[];
+}
+
+/** `POST /v1/backfill` on the local connector -- the private half of one press. */
+export interface LocalBackfillResult {
+  ok: boolean;
+  indexed: number;
+  units: number;
+  messages: number;
+  channels: number;
+  note?: string;
   log: string[];
 }

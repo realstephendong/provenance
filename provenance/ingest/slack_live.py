@@ -11,6 +11,7 @@ hence the de-duplication by timestamp.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from urllib.parse import urlparse
 
 from .. import config
@@ -81,15 +82,23 @@ def resolve_names(client: SlackClient, raw_messages: list[dict]) -> dict[str, st
     return names
 
 
-def load_slack(client: SlackClient, report: AccessReport, oldest: float = 0.0) -> list[Message]:
-    """Read every channel `report` says is accessible. `oldest=0` is the entire history."""
+def load_slack(client: SlackClient, report: AccessReport, oldest: float = 0.0, *,
+               private: bool | None = None,
+               say: Callable[[str], None] = print) -> list[Message]:
+    """Read the channels `report` says are accessible. `oldest=0` is the entire history.
+
+    `private` selects a data plane. The shared index passes `False` and therefore
+    never sees a private channel; the local connector passes `True` and sees only
+    private ones. `None` reads everything and is used by nothing that writes -- the
+    filter exists so that forgetting it is impossible rather than merely unlikely.
+    """
     apply_workspace(report.workspace_url)
 
     out: list[Message] = []
     # Only the readable ones: with SLACK_CHANNEL_IDS=* the report can carry channels
     # the token cannot open, and `check_access` deliberately treats those as skipped
     # rather than fatal.
-    for channel in [c for c in report.channels if c.ok]:
+    for channel in report.readable(private=private):
         raw = _fetch_channel(client, channel.channel_id, oldest)
         names = resolve_names(client, raw)
         kept = [
@@ -97,7 +106,8 @@ def load_slack(client: SlackClient, report: AccessReport, oldest: float = 0.0) -
             if (msg := to_message(m, channel.channel_id, channel.name,
                                   config.slack_tier_for(channel.name), names)) is not None
         ]
-        print(f"  #{channel.name}: {len(raw)} messages fetched, {len(kept)} indexable")
+        say(f"  #{channel.name}: {len(raw)} messages fetched, {len(kept)} indexable"
+            + (" (this machine only)" if channel.is_private else ""))
         out.extend(kept)
 
     out.sort(key=lambda m: (m.channel_name, m.ts))

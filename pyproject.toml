@@ -13,6 +13,9 @@ dynamic = ["dependencies"]
 
 [project.scripts]
 provenance = "provenance.cli.main:main"
+# The private connector. A console script rather than `python -m`, because the
+# editor spawns it and its working directory is the open folder, not this repo.
+provenance-local = "provenance.local_agent.main:main"
 
 [tool.setuptools]
 packages = [
@@ -22,6 +25,7 @@ packages = [
     "provenance.slackbot",
     "provenance.service",
     "provenance.mcp_server",
+    "provenance.local_agent",
     "provenance.cli",
 ]
 

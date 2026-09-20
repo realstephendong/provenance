@@ -56,6 +56,18 @@
       {
         "command": "provenance.openTimeline",
         "title": "Provenance: Open Timeline in Editor"
+      },
+      {
+        "command": "provenance.connectSlack",
+        "title": "Provenance: Connect Slack (private channels)"
+      },
+      {
+        "command": "provenance.privateStatus",
+        "title": "Provenance: Private Index Status"
+      },
+      {
+        "command": "provenance.deletePrivateIndex",
+        "title": "Provenance: Delete My Private Index"
       }
     ],
     "keybindings": [
@@ -93,6 +105,29 @@
           "type": "boolean",
           "default": true,
           "description": "Show a 'N discussions' lens above top-level declarations. Costs one HTTP request per declaration per file open (cached per document, invalidated on edit)."
+        },
+        "provenance.local.enabled": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Index private Slack channels on this machine, into an encrypted local store, and merge them into results as **Only visible to you**. Requires the `provenance` Python package. Nothing indexed this way is ever sent to the shared service."
+        },
+        "provenance.local.pythonPath": {
+          "type": "string",
+          "default": "python3",
+          "description": "Interpreter used to start the private connector."
+        },
+        "provenance.local.command": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "markdownDescription": "Full command to start the private connector, overriding `#provenance.local.pythonPath#`. Example: `[\"/path/to/.venv/bin/provenance-local\", \"serve\"]`."
+        },
+        "provenance.local.profile": {
+          "type": "string",
+          "default": "default",
+          "description": "Which local profile (store + credentials) the connector uses."
         }
       }
     }

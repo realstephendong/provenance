@@ -37,7 +37,24 @@ features:
       callback_id: index_thread
       description: Make this conversation findable from the code it explains
 oauth_config:
+  # Where Slack sends the browser back after someone connects their own account for
+  # private indexing. Loopback only: the authorization code is exchanged on the
+  # device, so no server ever sees the resulting user token. Slack matches this
+  # exactly, hence the pinned port -- start the connector with
+  # PROVENANCE_LOCAL_PORT=51737.
+  redirect_urls:
+    - http://127.0.0.1:51737/v1/auth/slack/callback
   scopes:
+    # `user` scopes are for the *private* half of Backfill and are granted by each
+    # person individually, in the browser, to the connector on their own machine.
+    # They are what lets someone index the private channels they can read without
+    # any of it reaching the shared index. The hosted bot never receives them.
+    user:
+      - channels:history
+      - channels:read
+      - groups:history
+      - groups:read
+      - users:read
     bot:
       - commands
       - chat:write

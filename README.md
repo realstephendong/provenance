@@ -491,6 +491,83 @@ same conversation. They overwrite each other; neither duplicates.
 
 ---
 
+## Public and private channels
+
+One Backfill press, two destinations.
+
+| | Public channels | Private channels |
+| --- | --- | --- |
+| Read with | the token the service is configured with | **your** Slack account, granted in the browser |
+| Indexed into | the shared company Elasticsearch | an encrypted store on your machine |
+| Who can retrieve it | anyone using this Provenance | you, on this laptop |
+| Badge in the panel | **Workspace** | **Only visible to you** |
+
+The split is made once, where the channel list is built: `check_access` records
+`is_private` for every channel, and `load_slack` reads one plane at a time. The
+service passes `private=False` and therefore cannot see a private channel even by
+accident; the connector passes `private=True` and sees nothing else.
+
+### Connecting your Slack account
+
+The private half needs a token that is yours rather than the company's, so it is
+granted the way a native app grants one — in a browser, once:
+
+1. **Provenance: Connect Slack (private channels)** in the command palette
+2. Slack asks whether Provenance may read the channels you're in; you approve
+3. The token lands in your OS keychain — macOS Keychain, Windows Credential
+   Manager, Secret Service on Linux — not in `.env`, not in the repo
+
+Set `SLACK_CLIENT_ID` in `.env` and register the redirect URL from
+`slack_app_manifest.yml` once, for everyone. If your Slack app is configured as a
+confidential OAuth client (the usual Slack app configuration), also set
+`SLACK_CLIENT_SECRET` locally from **Settings → Basic Information → App Credentials**.
+It is used only to exchange the one-time code and must never be committed. Slack
+matches redirect URLs exactly, so the connector's port is pinned:
+`PROVENANCE_LOCAL_PORT=51737`.
+
+If your workspace restricts app installs, **Paste a token** takes an `xoxp-` user
+token instead and verifies it before storing it.
+
+> Keep the Slack app **internal**. Since 2025-05-29 Slack throttles
+> `conversations.history` to 1 request/minute for apps with Public Distribution
+> enabled, which makes a backfill impractical. Distribution is only needed to share
+> an install link publicly; workspace members can authorize an internal app without
+> it.
+
+### What the connector is
+
+A separate process, on your machine, holding your token and your index. It binds
+loopback only — that is asserted in code rather than configured, because a private
+index reachable from the network is not a private index. The editor starts it and
+authenticates every call with a secret generated per launch and passed through the
+environment, never on the command line where other users could read it.
+
+Everything describing a conversation is encrypted at rest: text, summary, channel
+name, permalink, participants, and the embedding vector. Exact matching still works
+because file paths, PR numbers, commit shas and identifiers are stored as keyed
+HMACs rather than plaintext — equality survives, the values do not.
+
+Summarizing and embedding send text to a model provider, so the first private
+backfill asks for consent and records it. Revoking it stops future private indexing;
+deleting the index deletes the consent with it.
+
+```bash
+make local-status     # what is indexed here, and which Slack account
+make local-purge      # conversations, checkpoints, consent, key and token
+```
+
+Or from the palette: **Private Index Status**, **Delete My Private Index**.
+
+### How results come back
+
+The panel asks both planes at once and merges them on your machine. The scores are
+not comparable — the shared side's are rank-fusion numbers around 0.016, the private
+side's are cosine similarities around 0.8 — so ranking is by the order each side
+produced: exact matches first, then the two lists interleaved. Citations in the
+synthesis are renumbered to follow their evidence, because a synthesis citing `[2]`
+while `[2]` has become a different thread attributes a claim to evidence that does
+not support it.
+
 ## The seed corpus
 
 `make seed` regenerates `seed/repo` (a real git repo with backdated commits) and
@@ -593,6 +670,8 @@ provenance/
   integrations/      GitHub / tickets / incidents: fixtures or live, one adapter each
   ingest/            Slack -> Elasticsearch: sync.py is the library, three modes
   slackbot/          the on-demand bot: one conversation, indexed from Slack
+  local_agent/       the private half: Slack sign-in, encrypted on-device store,
+                     local retrieval, loopback API
   service/           the live /context pipeline
   mcp_server/        MCP stdio server
   cli/               terminal surface
@@ -609,11 +688,13 @@ their live APIs at once. No caller changes either way; see
 
 ## Non-goals
 
-A Slack OAuth login flow and Events API webhooks (live Slack is read with a pasted user
-token instead); per-user filtering on a shared index; a channel-approval UI; MCP-client
-connectors for the trackers (they are plain REST adapters behind `USE_MOCK_DATA`);
-multi-repository
-support; auth on the FastAPI service; embedding-based topic-shift segmentation;
-an offline/fake-LLM mode; a second retrieval implementation for the terminal or MCP
-path; production-scale reconciliation sharding; fuzzy cross-source identity resolution
-for `Person` nodes (name-string matching only).
+Events API webhooks (Backfill is a press, not a subscription); multi-tenancy, SSO on
+the service, and a job queue — this is one company's deployment, and the shared index
+is protected by being reachable only from inside it; per-user filtering of a shared
+index (the private plane is a separate store, not a filter); a channel-approval UI;
+reconciliation of the private store, so a message deleted in Slack stays in a local
+index until that index is purged; MCP-client connectors for the trackers (they are
+plain REST adapters behind `USE_MOCK_DATA`); multi-repository support;
+embedding-based topic-shift segmentation; an offline/fake-LLM mode; a second
+retrieval implementation for the terminal or MCP path; fuzzy cross-source identity
+resolution for `Person` nodes (name-string matching only).

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from .. import models
+from .. import config, models
 from ..integrations import github, sentry_issues, tickets
 
 
@@ -39,13 +39,27 @@ def resolve(
     blame: models.BlameInfo,
     hits: list[dict],
     conflicts: list[models.ConflictPair],
+    *,
+    scope: str = config.SCOPE_SHARED,
 ) -> models.Graph:
+    """Resolve one plane's evidence into a graph.
+
+    `scope` labels every node this call produces, and one call only ever sees one
+    plane: the service resolves shared hits, the local connector resolves private
+    ones on the person's own machine, and the panel merges the two graphs. The
+    service is never handed private thread text -- not as an optimisation, but
+    because the moment it is, the company has custody of it.
+    """
     nodes: dict[str, models.GraphNode] = {}
     edges: list[models.GraphEdge] = []
+    display = config.display_scope(scope)
 
     def node(id_, type_, label, data=None):
         if id_ not in nodes:
-            nodes[id_] = models.GraphNode(id=id_, type=type_, label=label, data=data or {})
+            nodes[id_] = models.GraphNode(
+                id=id_, type=type_, label=label, data=data or {},
+                scope=scope, display_scope=display,
+            )
         return id_
 
     code_id = node("code", "Code", "Selected code")

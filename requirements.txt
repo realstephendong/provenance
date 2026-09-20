@@ -9,3 +9,6 @@ sentry-sdk[fastapi,openai]
 mcp
 slack_bolt>=1.18
 PyJWT[crypto]>=2.8
+# OS credential store for the private connector's Slack token and store key.
+# Optional: local_agent/keychain.py falls back to a 0600 file and says so loudly.
+keyring>=24

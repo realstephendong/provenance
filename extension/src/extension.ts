@@ -3,6 +3,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { postCount } from './api';
 import { ProvenanceCodeLensProvider } from './codelens';
+import { LocalAgent } from './localAgent';
 import { Selection } from './types';
 import { keyFor, ProvenanceViewProvider } from './view';
 
@@ -184,7 +185,8 @@ class StatusIndicator {
 }
 
 export function activate(context: vscode.ExtensionContext): void {
-  const view = new ProvenanceViewProvider(serviceUrl);
+  const local = new LocalAgent();
+  const view = new ProvenanceViewProvider(serviceUrl, local);
   const codeLensProvider = new ProvenanceCodeLensProvider(context.subscriptions);
   const status = new StatusIndicator();
 
@@ -212,12 +214,79 @@ export function activate(context: vscode.ExtensionContext): void {
       view.openTimeline();
     }),
 
+    // --- the private half ---------------------------------------------------
+    // Everything here is about one person's own machine. Nothing it does is
+    // visible to, or reachable by, the shared service.
+
+    vscode.commands.registerCommand('provenance.connectSlack', async () => {
+      if (!await local.ensure()) {
+        const pick = await vscode.window.showErrorMessage(
+          'The Provenance connector could not start. It needs the provenance package '
+          + '(pip install -e .) and provenance.local.command pointing at it.',
+          'Show Log',
+        );
+        if (pick === 'Show Log') { local.show(); }
+        return;
+      }
+      try {
+        const { authorize_url } = await local.startSlackAuth();
+        await vscode.env.openExternal(vscode.Uri.parse(authorize_url));
+      } catch (err) {
+        // No SLACK_CLIENT_ID, or the app has no redirect URL registered. Pasting a
+        // token is the way through that, so offer it rather than dead-ending.
+        const pick = await vscode.window.showErrorMessage(
+          `Browser sign-in unavailable: ${String(err)}`, 'Paste a token',
+        );
+        if (pick !== 'Paste a token') { return; }
+        const token = await vscode.window.showInputBox({
+          title: 'Slack user token', password: true, ignoreFocusOut: true,
+          prompt: 'A user token (xoxp-...). A bot token cannot read private channels.',
+        });
+        if (token) { await local.importSlackToken(token); }
+      }
+    }),
+
+    vscode.commands.registerCommand('provenance.privateStatus', async () => {
+      if (!await local.ensure()) {
+        vscode.window.showInformationMessage('The private connector is not running.');
+        return;
+      }
+      const info = await local.status();
+      const who = info.slack.signed_in
+        ? `${info.slack.user ?? 'signed in'} @ ${info.slack.team_name ?? 'workspace'}`
+        : 'not connected';
+      const pick = await vscode.window.showInformationMessage(
+        `Private index: ${info.store.documents} conversations from `
+        + `${info.store.channels} channels · Slack: ${who} · key in ${info.store.key_backend}`,
+        'Show Log', 'Delete everything',
+      );
+      if (pick === 'Show Log') { local.show(); }
+      if (pick === 'Delete everything') {
+        await vscode.commands.executeCommand('provenance.deletePrivateIndex');
+      }
+    }),
+
+    vscode.commands.registerCommand('provenance.deletePrivateIndex', async () => {
+      const choice = await vscode.window.showWarningMessage(
+        'Delete the private index on this machine? This removes every privately '
+        + 'indexed conversation, the encryption key and the stored Slack token. '
+        + 'It cannot be undone.',
+        { modal: true }, 'Delete',
+      );
+      if (choice !== 'Delete') { return; }
+      const result = await local.purge();
+      vscode.window.showInformationMessage(
+        `Deleted ${result.deleted_documents} private conversations and the key.`,
+      );
+    }),
+
     vscode.window.onDidChangeTextEditorSelection(() => status.schedule()),
     vscode.window.onDidChangeActiveTextEditor(() => status.schedule()),
 
     vscode.languages.registerCodeLensProvider({ scheme: 'file' }, codeLensProvider),
     codeLensProvider,
     status,
+    local,
     view,
   );
 

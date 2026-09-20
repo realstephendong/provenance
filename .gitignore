@@ -20,3 +20,6 @@ seed/slack/
 
 # local graph previews (generated, not part of the build)
 preview_*.html
+
+# editable install metadata
+*.egg-info/
