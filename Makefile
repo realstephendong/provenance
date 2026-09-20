@@ -4,7 +4,7 @@ PYTHON ?= python3.12
 PY := .venv/bin/python
 
 .PHONY: install es seed ingest ingest-incremental reconcile serve mcp eval calibrate \
-        extension demo clean slack-check ingest-slack ingest-slack-incremental reconcile-slack \
+        extension extension-package extension-install demo clean slack-check ingest-slack ingest-slack-incremental reconcile-slack \
         slackbot deploy deploy-logs deploy-down local local-status local-purge
 
 install:
@@ -92,6 +92,22 @@ calibrate:
 
 extension:
 	cd extension && npm install && npm run compile
+
+# Package the current VS Code extension into a distributable VSIX.
+extension-package:
+	cd extension && npm install && npm run package
+
+# Build and force-install the VSIX. First run "Shell Command: Install 'code' command
+# in PATH" from VS Code if this says the CLI is unavailable.
+extension-install: extension-package
+	@if command -v code >/dev/null 2>&1; then \
+		code --install-extension extension/provenance-1.1.0.vsix --force && \
+		echo "installed — run 'Developer: Reload Window' in VS Code"; \
+	else \
+		echo "VS Code's 'code' command is not on PATH."; \
+		echo "In VS Code run: Shell Command: Install 'code' command in PATH"; \
+		echo "Then open a new terminal and rerun: make extension-install"; \
+	fi
 
 demo: es seed ingest
 	@echo "now: make serve, then F5 in extension/, or: make mcp"

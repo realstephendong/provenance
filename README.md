@@ -135,6 +135,7 @@ Every target:
 | `make mcp` | the MCP stdio server |
 | `make eval` / `make calibrate` | the eval suite; a `NULL_THRESHOLD` suggestion |
 | `make extension` | `npm install` + `tsc` in `extension/` |
+| `make extension-install` | package and force-install the current VSIX, then reload VS Code |
 | `make demo` | `es` + `seed` + `ingest` |
 | `make clean` | drop generated seed data, the ES volume, `extension/out` |
 

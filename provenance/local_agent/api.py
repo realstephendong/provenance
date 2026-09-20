@@ -118,6 +118,19 @@ def create_app(state: AgentState) -> FastAPI:
             raise HTTPException(status_code=502, detail=str(exc)) from None
         return {"ok": True, **result, "scope": config.SCOPE_PRIVATE, "log": log}
 
+    @app.post("/v1/reconcile")
+    async def reconcile(agent: AgentState = Depends(guard)) -> dict:
+        log: list[str] = []
+        try:
+            result = await agent.ingest.reconcile(say=log.append)
+        except ConsentRequired as exc:
+            raise HTTPException(status_code=428, detail=str(exc)) from None
+        except NotSignedIn as exc:
+            raise HTTPException(status_code=401, detail=str(exc)) from None
+        except NotIndexable as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from None
+        return {"ok": True, **result, "scope": config.SCOPE_PRIVATE, "log": log}
+
     # --- retrieval ---------------------------------------------------------------
 
     @app.post("/v1/context", response_model=ContextResponse)

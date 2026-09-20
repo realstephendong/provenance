@@ -27,7 +27,7 @@ from ..ingest.embed import embed_summaries
 from ..ingest.segment import Unit, segment
 from ..ingest.slack_client import SlackClient, SlackError
 from ..ingest.slack_live import load_slack
-from .store import LocalDoc, LocalStore
+from .store import LocalDoc, LocalStore, doc_id_for
 
 CONSENT_REMOTE_PROCESSING = "remote_processing"
 
@@ -186,6 +186,38 @@ class LocalIngest:
         say(f"  indexed {written} private conversation(s), encrypted on this machine")
         return {"indexed": written, "units": len(units), "messages": len(fresh),
                 "channels": len(channels)}
+
+    async def reconcile(self, say=print) -> dict:
+        """Re-read private Slack history and remove deleted/changed conversations."""
+        self.require_consent()
+        report = self.access(say)
+        channels = report.readable(private=True)
+        try:
+            pool = await _to_thread(load_slack, self.client(), report, 0.0,
+                                    private=True, say=say)
+        except SlackError as exc:
+            raise NotIndexable(f"Slack read failed: {exc}") from None
+        units = segment(pool)
+        current = {
+            doc_id_for(self.store.profile_id, report.team_id, u.channel_id, u.thread_id):
+            (u, load.content_hash(u.raw_text))
+            for u in units
+        }
+        indexed = self.store.document_hashes()
+        missing = [doc_id for doc_id in current if doc_id not in indexed]
+        changed = [doc_id for doc_id, (_, digest) in current.items()
+                   if doc_id in indexed and indexed[doc_id] != digest]
+        stale = [doc_id for doc_id in indexed if doc_id not in current]
+        say(f"reconcile: missing={len(missing)} changed={len(changed)} stale={len(stale)}")
+        written = await self._store_units([current[doc_id][0] for doc_id in missing + changed],
+                                          report.team_id)
+        for doc_id in stale:
+            self.store.delete_document(doc_id)
+        if stale:
+            say(f"  deleted {len(stale)} stale private conversations")
+        return {"mode": "reconcile", "messages": len(pool), "units": len(units),
+                "channels": len(channels), "missing": len(missing),
+                "changed": len(changed), "stale": len(stale), "indexed": written}
 
 
 async def _to_thread(fn, *args, **kwargs):

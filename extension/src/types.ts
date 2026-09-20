@@ -158,6 +158,16 @@ export interface IngestResult {
   log: string[];
 }
 
+export interface ReconcileResult {
+  ok: boolean;
+  mode: 'reconcile';
+  missing: number;
+  changed: number;
+  stale: number;
+  indexed: number;
+  log: string[];
+}
+
 /** `GET /v1/status` on the local connector. */
 export interface LocalStatus {
   ok: boolean;
@@ -190,4 +200,10 @@ export interface LocalBackfillResult {
   channels: number;
   note?: string;
   log: string[];
+}
+
+export interface LocalReconcileResult extends ReconcileResult {
+  messages: number;
+  units: number;
+  channels: number;
 }
