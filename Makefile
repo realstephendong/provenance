@@ -101,7 +101,7 @@ extension-package:
 # in PATH" from VS Code if this says the CLI is unavailable.
 extension-install: extension-package
 	@if command -v code >/dev/null 2>&1; then \
-		code --install-extension extension/provenance-1.1.0.vsix --force; \
+		code --install-extension extension/provenance-1.1.0.vsix --force && \
 		echo "installed — run 'Developer: Reload Window' in VS Code"; \
 	else \
 		echo "VS Code's 'code' command is not on PATH."; \
