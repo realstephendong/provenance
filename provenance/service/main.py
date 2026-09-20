@@ -182,6 +182,34 @@ async def ingest_sync() -> dict:
         return {"ok": True, **counts, **sync.coverage(_checkpoint_path()), "log": log}
 
 
+@app.post("/ingest/reconcile")
+async def ingest_reconcile() -> dict:
+    """Full-history cleanup for Slack edits and deletions; intentionally not Backfill."""
+    if _ingest_lock.locked():
+        raise HTTPException(status_code=409, detail="a sync is already running")
+    async with _ingest_lock:
+        try:
+            config.require_api_key()
+        except config.MissingAPIKey as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from None
+        intended = "export" if config.USE_MOCK_DATA else "slack"
+        conflict = sync.corpus_conflict(es_client(), intended)
+        if conflict:
+            raise HTTPException(status_code=409, detail=conflict)
+        log: list[str] = []
+        try:
+            source = await asyncio.to_thread(sync.default_source, log.append)
+            result = await sync.run_reconcile(source.load, say=log.append)
+        except sync.SourceUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from None
+        except SlackError as exc:
+            raise HTTPException(status_code=502, detail=f"Slack read failed: {exc}") from None
+        finally:
+            if "source" in locals():
+                source.close()
+        return {"ok": True, **result, "log": log}
+
+
 def _to_results(hits: list[dict]) -> list[Result]:
     results = []
     for hit in hits:

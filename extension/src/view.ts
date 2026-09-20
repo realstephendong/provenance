@@ -1,6 +1,6 @@
 import { createHash } from 'crypto';
 import * as vscode from 'vscode';
-import { getIngestStatus, postContext, postIngestSync } from './api';
+import { getIngestStatus, postContext, postIngestReconcile, postIngestSync } from './api';
 import { fuse, scopeCounts } from './fusion';
 import { renderGraph } from './graph';
 import { LocalAgent } from './localAgent';
@@ -147,6 +147,15 @@ export class ProvenanceViewProvider implements vscode.WebviewViewProvider {
         return;
       case 'backfill':
         await this.backfill();
+        return;
+      case 'reconcile':
+        await this.reconcile();
+        return;
+      case 'connectSlack':
+        await vscode.commands.executeCommand('provenance.connectSlack');
+        return;
+      case 'privateStatus':
+        await vscode.commands.executeCommand('provenance.privateStatus');
         return;
       case 'showHistory':
         if (message.key) { this.showHistory(message.key); }
@@ -499,6 +508,36 @@ export class ProvenanceViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  private async reconcile(): Promise<void> {
+    if (this.ingestBusy) { return; }
+    const choice = await vscode.window.showWarningMessage(
+      'Reconcile rereads all allowed Slack history to remove deleted conversations and refresh edits. It may take a while.',
+      { modal: true }, 'Reconcile now',
+    );
+    if (choice !== 'Reconcile now') { return; }
+    this.ingestBusy = true;
+    this.postStatusBar('Reconciling Slack history…', { busy: true, label: 'Reconciling…' });
+    const wantsPrivate = await this.ensurePrivateReady();
+    const [shared, local] = await Promise.allSettled([
+      postIngestReconcile(this.serviceUrl()),
+      wantsPrivate ? this.local.reconcile() : Promise.resolve(undefined),
+    ]);
+    this.ingestBusy = false;
+    const sharedText = shared.status === 'fulfilled'
+      ? `Shared: ${shared.value.indexed} refreshed · ${shared.value.stale} deleted`
+      : `Shared unavailable: ${String(shared.reason)}`;
+    const localText = local.status === 'fulfilled' && local.value
+      ? `Private: ${local.value.indexed} refreshed · ${local.value.stale} deleted`
+      : local.status === 'rejected' ? `Private failed: ${String(local.reason)}` : '';
+    const isError = shared.status === 'rejected' && local.status !== 'fulfilled';
+    this.postStatusBar([sharedText, localText].filter(Boolean).join(' · '), {
+      isError, title: [
+        shared.status === 'fulfilled' ? shared.value.log.join('\n') : sharedText,
+        local.status === 'fulfilled' && local.value ? local.value.log.join('\n') : localText,
+      ].filter(Boolean).join('\n\n'),
+    });
+  }
+
   /** Copy the findings as markdown and append them to `.provenance/context.md` in
    *  the workspace, which is where a coding agent is pointed to pick them up. */
   private async sendToAgent(): Promise<void> {
@@ -564,6 +603,9 @@ ${STYLES}
 <div id="statusbar">
   <span class="sb-note" id="sb-note">&nbsp;</span>
   <button id="backfill" title="Index Slack messages posted since the last sync">Backfill</button>
+  <button id="reconcile" title="Re-read Slack history to remove deleted conversations and refresh edits">Reconcile</button>
+  <button id="connect-slack" title="Connect your Slack account for private indexing">Connect Slack</button>
+  <button id="private-status" title="Show private index and Slack connection status">Private Status</button>
 </div>
 <script>
 ${CLIENT_SCRIPT}
@@ -1167,6 +1209,7 @@ const CLIENT_SCRIPT = `
     } else if (message.type === 'statusbar') {
       const note = document.getElementById('sb-note');
       const button = document.getElementById('backfill');
+      const reconcile = document.getElementById('reconcile');
       if (note) {
         note.textContent = message.note || '';
         note.className = 'sb-note' + (message.isError ? ' error' : '');
@@ -1176,6 +1219,7 @@ const CLIENT_SCRIPT = `
         button.disabled = !!message.busy;
         button.textContent = message.label || 'Backfill';
       }
+      if (reconcile) { reconcile.disabled = !!message.busy; }
     }
   });
 
@@ -1225,6 +1269,9 @@ const CLIENT_SCRIPT = `
     const button = target.closest('button');
     if (!button) { return; }
     if (button.id === 'backfill') { vscodeApi.postMessage({ type: 'backfill' }); }
+    else if (button.id === 'reconcile') { vscodeApi.postMessage({ type: 'reconcile' }); }
+    else if (button.id === 'connect-slack') { vscodeApi.postMessage({ type: 'connectSlack' }); }
+    else if (button.id === 'private-status') { vscodeApi.postMessage({ type: 'privateStatus' }); }
     else if (button.id === 'send-to-agent') { vscodeApi.postMessage({ type: 'sendToAgent' }); }
     else if (button.id === 'refresh') { vscodeApi.postMessage({ type: 'refresh' }); }
     else if (button.id === 'retry') { vscodeApi.postMessage({ type: 'retry' }); }

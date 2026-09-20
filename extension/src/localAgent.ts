@@ -1,7 +1,7 @@
 import { ChildProcess, spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import * as vscode from 'vscode';
-import { ContextResponse, LocalBackfillResult, LocalStatus, Selection } from './types';
+import { ContextResponse, LocalBackfillResult, LocalReconcileResult, LocalStatus, Selection } from './types';
 
 /**
  * Supervises the private connector: a separate process, on this machine, holding
@@ -217,6 +217,11 @@ export class LocalAgent implements vscode.Disposable {
   backfill(): Promise<LocalBackfillResult> {
     return this.request<LocalBackfillResult>('POST', '/v1/backfill', undefined,
                                              INDEX_TIMEOUT_MS);
+  }
+
+  reconcile(): Promise<LocalReconcileResult> {
+    return this.request<LocalReconcileResult>('POST', '/v1/reconcile', undefined,
+                                              INDEX_TIMEOUT_MS);
   }
 
   startSlackAuth(): Promise<{ authorize_url: string; state: string }> {

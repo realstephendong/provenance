@@ -516,6 +516,13 @@ class LocalStore:
             for r in rows
         ]
 
+    def document_hashes(self) -> dict[str, str]:
+        """Opaque document ids and hashes for a full source reconciliation."""
+        return {
+            row["doc_id"]: row["content_hash"]
+            for row in self._db().execute("SELECT doc_id, content_hash FROM documents")
+        }
+
     def delete_document(self, doc_id: str) -> None:
         conn = self._db()
         with self._lock:

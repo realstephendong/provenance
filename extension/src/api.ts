@@ -1,4 +1,4 @@
-import { ContextResponse, CountResponse, IngestResult, IngestStatus, Selection } from './types';
+import { ContextResponse, CountResponse, IngestResult, IngestStatus, ReconcileResult, Selection } from './types';
 
 const CONTEXT_TIMEOUT_MS = 30_000;
 // CodeLens must never visibly hang, so its budget is far tighter.
@@ -73,4 +73,8 @@ export function getIngestStatus(base: string): Promise<IngestStatus> {
 
 export function postIngestSync(base: string): Promise<IngestResult> {
   return request<IngestResult>(`${base}/ingest/sync`, SYNC_TIMEOUT_MS, { method: 'POST' });
+}
+
+export function postIngestReconcile(base: string): Promise<ReconcileResult> {
+  return request<ReconcileResult>(`${base}/ingest/reconcile`, SYNC_TIMEOUT_MS, { method: 'POST' });
 }
