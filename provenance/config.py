@@ -255,10 +255,11 @@ INGEST_CHECKPOINT_FILE = f"{WORKSPACE_STATE_DIR}/ingest_checkpoint.json"
 # The live reader (ingest/slack_live.py) overwrites this from `auth.test` at run time.
 SLACK_WORKSPACE = os.environ.get("SLACK_WORKSPACE", "acme")
 
-# --- Live Slack (ingest --source slack) ------------------------------------------
-# The only value a person has to fill in is SLACK_USER_TOKEN. Team and channel default
-# to the workspace this project indexes. Blank token = live Slack is off; it never
-# falls back to seed data, because `--source slack` is an explicit request.
+# --- Live Slack (shared ingest --source slack) -----------------------------------
+# Shared backfill reads with the workspace bot, never a developer's personal OAuth
+# credential. Its channel allowlist is the same policy the on-demand bot obeys.
+# `SLACK_USER_TOKEN` remains only as a one-time import path for the local connector;
+# it is deliberately not used by the shared service.
 SLACK_API = os.environ.get("SLACK_API", "https://slack.com/api").rstrip("/")
 SLACK_USER_TOKEN = os.environ.get("SLACK_USER_TOKEN", "").strip()
 SLACK_TEAM_ID = os.environ.get("SLACK_TEAM_ID", "T0C34UQUW68").strip()
@@ -271,7 +272,6 @@ SLACK_CHANNEL_IDS = [
     for c in os.environ.get("SLACK_CHANNEL_IDS", "C0C34DY037B").split(",")
     if c.strip()
 ]
-SLACK_DISCOVER_CHANNELS = "*" in SLACK_CHANNEL_IDS
 SLACK_CHANNEL_TIER = int(os.environ.get("SLACK_CHANNEL_TIER", "2"))
 # Per-channel override: "eng-incidents:1,eng-payments:1,social:3". A live workspace
 # has the same spread of signal and noise the seed corpus encoded in
@@ -310,10 +310,9 @@ SLACK_PAGE_SIZE = 200
 # The installed workspace bot reads conversations with SLACK_BOT_TOKEN.  Keep its
 # reach deliberately narrow: only channels listed here may be added to the shared
 # index. Set this to `*` to allow every public channel; private channels still need a
-# manual invitation in Slack. This is separate from SLACK_CHANNEL_IDS, which is for a
-# person's optional bulk ingest. Defaulting to the latter preserves the single-channel
-# setup while preventing a shortcut in an arbitrary (possibly private) channel from
-# publishing its contents to the shared index.
+# manual invitation in Slack. This is also the shared bulk-ingest allowlist.
+# Defaulting to the legacy SLACK_CHANNEL_IDS preserves old local configuration, but
+# new deployments should set SLACK_BOT_CHANNEL_IDS explicitly.
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "").strip()
 SLACK_APP_TOKEN = os.environ.get("SLACK_APP_TOKEN", "").strip()
 SLACK_BOT_CHANNEL_IDS = [
@@ -323,6 +322,7 @@ SLACK_BOT_CHANNEL_IDS = [
     ).split(",")
     if c.strip()
 ]
+SLACK_DISCOVER_CHANNELS = "*" in SLACK_BOT_CHANNEL_IDS
 # Must match the command declared in slack_app_manifest.yml.
 SLACK_BOT_COMMAND = os.environ.get("SLACK_BOT_COMMAND", "/provenance").strip()
 SLACK_BOT_SHORTCUT = "index_thread"      # the message shortcut's callback_id

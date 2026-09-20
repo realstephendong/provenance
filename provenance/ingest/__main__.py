@@ -47,7 +47,7 @@ def main() -> None:
     default_source = "export" if config.USE_MOCK_DATA else "slack"
     parser.add_argument("--source", default=default_source, choices=["export", "slack"],
                         help="export = a Slack export directory; slack = the live channel "
-                             "(needs SLACK_USER_TOKEN in .env). "
+                             "(needs SLACK_BOT_TOKEN in .env). "
                              f"Default follows USE_MOCK_DATA, currently {default_source!r}.")
     parser.add_argument("--export", help="path to the Slack export directory (--source export)")
     parser.add_argument("--mode", default="backfill", choices=["backfill", "incremental", "reconcile"])

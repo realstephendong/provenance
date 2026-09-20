@@ -30,7 +30,7 @@ ingest-incremental:
 reconcile:
 	$(PY) -m provenance.ingest --export seed/slack --mode reconcile
 
-# Live Slack: needs SLACK_USER_TOKEN in .env (see README, "Connecting to Slack").
+# Live shared Slack: needs SLACK_BOT_TOKEN and SLACK_BOT_CHANNEL_IDS in .env.
 slack-check:
 	$(PY) -m provenance.ingest.slack_check
 

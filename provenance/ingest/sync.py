@@ -179,7 +179,7 @@ def incremental_oldest(state: dict) -> float:
     `affected_messages` needs the surrounding pool, not just new messages: a burst can
     continue from up to SEGMENT_GAP_SECONDS before the checkpoint, and recent threads
     can have gained replies. Threads whose parent is older than the lookback are left
-    to `--mode reconcile`, as is a channel newly added to SLACK_CHANNEL_IDS.
+    to `--mode reconcile`, as is a channel newly added to SLACK_BOT_CHANNEL_IDS.
     """
     last = [entry.get("last_ts", 0.0) for entry in state.values()]
     if not last:
@@ -308,13 +308,15 @@ def slack_source(say: Say = print) -> Source:
     Elasticsearch or OpenAI work, so a person without access is told so rather than
     billed for it.
     """
-    if not config.SLACK_USER_TOKEN:
+    if not config.SLACK_BOT_TOKEN:
         raise SourceUnavailable(slack_check.NO_TOKEN_HELP)
 
     say("checking Slack access...")
-    client = SlackClient(config.SLACK_USER_TOKEN)
-    report = slack_check.check_access(client, config.SLACK_TEAM_ID,
-                                      config.SLACK_CHANNEL_IDS, say=say)
+    client = SlackClient(config.SLACK_BOT_TOKEN)
+    report = slack_check.check_access(
+        client, config.SLACK_TEAM_ID, config.SLACK_BOT_CHANNEL_IDS, say=say,
+        private=False, join_public=True,
+    )
     if not report.ok:
         client.close()
         raise SourceUnavailable("\n".join(slack_check.verdict_lines(report)))
@@ -324,10 +326,7 @@ def slack_source(say: Say = print) -> Source:
     # machine instead (`provenance.local_agent`). The filter lives in `load_slack`
     # rather than here so that every caller gets it, not just this one.
     shared = report.readable(private=False)
-    private = report.readable(private=True)
     say(f"  [ok] shared index: {len(shared)} public channel(s)")
-    if private:
-        say(f"  [ok] {len(private)} private channel(s) held back for this machine")
     return Source(
         load=lambda oldest: slack_live.load_slack(client, report, oldest,
                                                   private=False, say=say),

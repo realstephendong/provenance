@@ -95,7 +95,7 @@ def load_slack(client: SlackClient, report: AccessReport, oldest: float = 0.0, *
     apply_workspace(report.workspace_url)
 
     out: list[Message] = []
-    # Only the readable ones: with SLACK_CHANNEL_IDS=* the report can carry channels
+    # Only the readable ones: with the wildcard bot allowlist the report can carry channels
     # the token cannot open, and `check_access` deliberately treats those as skipped
     # rather than fatal.
     for channel in report.readable(private=private):

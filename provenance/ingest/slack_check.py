@@ -1,12 +1,11 @@
-"""Does the token in `.env` give this person access to the Slack channel?
+"""Does the shared workspace bot have access to the approved public channels?
 
     python -m provenance.ingest.slack_check        (or: make slack-check)
 
-Runs four real checks against Slack -- token present, token valid and for the right
-workspace, channel visible, channel readable -- prints one line per step and a plain
-verdict per channel, and exits 0 only if every configured channel is readable. The
-answer is empirical rather than inferred from scopes, so it is right for public and
-private channels alike.
+Runs four real checks against Slack -- bot token present, token valid and for the
+right workspace, channel visible, channel readable -- prints one line per step and a
+plain verdict per channel. It joins approved public channels when needed, but never
+reads private-channel content in this shared path.
 
 `check_access` is also the gate for `ingest --source slack`, so a person without access
 is told so before any OpenAI spend.
@@ -22,14 +21,15 @@ from .. import config
 from .slack_client import SlackClient, SlackError
 
 NO_TOKEN_HELP = """\
-SLACK_USER_TOKEN is not set.
+SLACK_BOT_TOKEN is not set.
 
   1. Create a Slack app from slack_app_manifest.yml in your workspace
      (https://api.slack.com/apps -> Create New App -> From a manifest).
      It must stay an internal app -- do not distribute it.
   2. Install it to the workspace (an admin may have to approve it).
-  3. Copy the "User OAuth Token" (starts with xoxp-) from "OAuth & Permissions".
-  4. Put it in .env:   SLACK_USER_TOKEN=xoxp-...
+  3. Copy the "Bot User OAuth Token" (starts with xoxb-) from "OAuth & Permissions".
+  4. Put it in .env:   SLACK_BOT_TOKEN=xoxb-...
+     Set SLACK_BOT_CHANNEL_IDS to the public channels that may enter the shared index.
   5. Run this check again.
 
 Full steps: "Connecting to Slack" in README.md."""
@@ -80,41 +80,48 @@ def _explain(err: SlackError, channel_id: str) -> tuple[str, str]:
     if err.code == "channel_not_found":
         return (
             f"channel {channel_id} is not visible to you",
-            "it is private and you are not a member, or the channel ID is wrong -- "
-            "ask a member to add you",
+            "it may be private, or the channel ID is wrong -- invite the bot to a "
+            "private channel or check the allowlist",
         )
     if err.code == "not_in_channel":
-        return "you are not a member of the channel", "join the channel in Slack"
+        return "the bot is not a member of the channel", "allow it to join the public channel or invite it"
     if err.code == "missing_scope":
         needed = err.needed or "the channels:*/groups:* history and read scopes"
         return (
             f"your token is missing a scope ({needed})",
-            "add it under 'User Token Scopes' (slack_app_manifest.yml lists them) "
-            "and reinstall the app, then copy the new token",
+            "add it under 'Bot Token Scopes' (slack_app_manifest.yml lists them) "
+            "and reinstall the app, then copy the new bot token",
         )
     if err.code in _BAD_TOKEN:
-        return "Slack rejected your token", "generate a new User OAuth Token and update .env"
+        return "Slack rejected the bot token", "reinstall the app and update SLACK_BOT_TOKEN"
     if err.code == "access_denied":
         return "Slack denied access to this channel", "ask a workspace admin or channel member"
     return f"Slack returned '{err.code}'", "re-run; if it persists, check the Slack app's settings"
 
 
-def discover_channels(client: SlackClient, say: Callable[[str], None] = print) -> list[str]:
-    """Every non-archived channel the token can see, for `SLACK_CHANNEL_IDS=*`.
+def discover_channels(client: SlackClient, *, private: bool | None = None,
+                      say: Callable[[str], None] = print) -> list[str]:
+    """Every non-archived channel in the requested visibility plane.
 
     Listing is not reading: a public channel appears here whether or not you have
     joined it, and a private one only if you are a member. Whether each is actually
     readable is still settled by the per-channel probe below, which is the only
     answer this module ever trusts.
     """
+    types = (
+        "public_channel" if private is False else
+        "private_channel" if private is True else
+        "public_channel,private_channel"
+    )
     ids = [
         ch["id"]
         for ch in client.paginate("conversations.list", "channels",
-                                  types="public_channel,private_channel",
+                                  types=types,
                                   exclude_archived=True, limit=200)
         if not ch.get("is_archived")
     ]
-    say(f"  [ok] discovered {len(ids)} channels from SLACK_CHANNEL_IDS=*")
+    plane = "public" if private is False else "private" if private is True else "all"
+    say(f"  [ok] discovered {len(ids)} {plane} channels from the wildcard allowlist")
     return ids
 
 
@@ -123,6 +130,8 @@ def check_access(
     team_id: str,
     channel_ids: list[str],
     say: Callable[[str], None] = print,
+    private: bool | None = None,
+    join_public: bool = False,
 ) -> AccessReport:
     report = AccessReport()
 
@@ -150,7 +159,7 @@ def check_access(
     if "*" in channel_ids:
         report.discovered = True
         try:
-            channel_ids = discover_channels(client, say)
+            channel_ids = discover_channels(client, private=private, say=say)
         except SlackError as exc:
             reason, fix = _explain(exc, "")
             report.error = f"could not list channels: {reason} -> {fix}"
@@ -167,6 +176,20 @@ def check_access(
             access.is_private = bool(channel.get("is_private"))
             say(f"  [ok] channel visible: #{access.name} ({cid})"
                 + (" [private]" if access.is_private else ""))
+            if private is not None and access.is_private != private:
+                access.reason = (
+                    "private channels cannot enter the shared index"
+                    if access.is_private else "public channels belong to the shared index"
+                )
+                access.fix = (
+                    "remove it from SLACK_BOT_CHANNEL_IDS"
+                    if access.is_private else "use the shared bot allowlist"
+                )
+                say(f"  [ok] skipped #{access.name}: outside this indexing plane")
+                continue
+            if join_public and not access.is_private and not channel.get("is_member"):
+                client.call("conversations.join", channel=cid)
+                say(f"  [ok] bot joined public channel: #{access.name}")
             client.call("conversations.history", channel=cid, limit=1)
             say(f"  [ok] channel readable: #{access.name}")
             access.ok = True
@@ -197,11 +220,11 @@ def verdict_lines(report: AccessReport) -> list[str]:
     if report.error:
         return [f"NO ACCESS: {report.error}"]
     if not report.channels:
-        return ["NO ACCESS: no channels configured -> set SLACK_CHANNEL_IDS in .env"]
+        return ["NO ACCESS: no channels configured -> set SLACK_BOT_CHANNEL_IDS in .env"]
     if report.discovered:
         readable = [c for c in report.channels if c.ok]
         if not readable:
-            return ["NO ACCESS: SLACK_CHANNEL_IDS=* found no channel this token can read"]
+            return ["NO ACCESS: SLACK_BOT_CHANNEL_IDS=* found no public channel the bot can read"]
         return [f"ACCESS OK: {len(readable)} channel(s) — "
                 + ", ".join(f"#{c.name}" for c in readable)]
     return [
@@ -211,14 +234,15 @@ def verdict_lines(report: AccessReport) -> list[str]:
 
 
 def main() -> None:
-    if not config.SLACK_USER_TOKEN:
+    if not config.SLACK_BOT_TOKEN:
         print(NO_TOKEN_HELP)
         sys.exit(1)
 
     print(f"Checking Slack access (workspace {config.SLACK_TEAM_ID}, "
-          f"channels {', '.join(config.SLACK_CHANNEL_IDS) or '-'})")
-    with SlackClient(config.SLACK_USER_TOKEN) as client:
-        report = check_access(client, config.SLACK_TEAM_ID, config.SLACK_CHANNEL_IDS)
+          f"public channels {', '.join(config.SLACK_BOT_CHANNEL_IDS) or '-'})")
+    with SlackClient(config.SLACK_BOT_TOKEN) as client:
+        report = check_access(client, config.SLACK_TEAM_ID, config.SLACK_BOT_CHANNEL_IDS,
+                              private=False, join_public=True)
     print()
     for line in verdict_lines(report):
         print(line)

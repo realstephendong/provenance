@@ -108,7 +108,7 @@ def ingest_status() -> dict:
         # feature had no way to show: backfill reported success having looked at one
         # channel of fourteen. `*` resolves at ingest time, so the count is unknown
         # here and the panel says so rather than guessing.
-        "scope": "*" if config.SLACK_DISCOVER_CHANNELS else len(config.SLACK_CHANNEL_IDS),
+        "scope": "*" if config.SLACK_DISCOVER_CHANNELS else len(config.SLACK_BOT_CHANNEL_IDS),
     }
     try:
         es = es_client()
