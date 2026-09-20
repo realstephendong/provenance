@@ -2,10 +2,14 @@
   "name": "provenance",
   "displayName": "Provenance",
   "description": "Recover the evidence chain behind a piece of code: the commit, the PR, the Slack threads, the ticket, the incident.",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "publisher": "provenance",
   "private": true,
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/realstephendong/provenance.git"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -95,11 +99,14 @@
   },
   "scripts": {
     "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./"
+    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "npm run compile",
+    "package": "vsce package --out provenance-1.1.0.vsix"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
     "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.9.2",
     "typescript": "^5.4.0"
   }
 }
