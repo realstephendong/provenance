@@ -44,6 +44,12 @@ class ChannelAccess:
     ok: bool = False
     reason: str = ""      # why not, when ok is False
     fix: str = ""
+    # Which data plane this channel belongs to. A private channel is only visible to
+    # its members, so indexing it into the shared company index would publish it to
+    # everyone who can use Provenance. It goes to the person's own machine instead --
+    # see `local_agent/`. Captured here because `conversations.info` already answers
+    # it, and this is the only place the whole channel list passes through.
+    is_private: bool = False
 
 
 @dataclass
@@ -55,6 +61,18 @@ class AccessReport:
     workspace_url: str = ""
     channels: list[ChannelAccess] = field(default_factory=list)
     error: str = ""       # a token/workspace-level failure that stops the check early
+
+    def readable(self, *, private: bool | None = None) -> list[ChannelAccess]:
+        """The channels this token can actually read, optionally one plane's worth.
+
+        `private=False` is the shared index's list, `private=True` the local one, and
+        `None` everything. Having one place answer this is what stops a private
+        channel reaching the company index because some caller forgot to filter.
+        """
+        return [
+            c for c in self.channels
+            if c.ok and (private is None or c.is_private == private)
+        ]
 
 
 def _explain(err: SlackError, channel_id: str) -> tuple[str, str]:
@@ -146,7 +164,9 @@ def check_access(
             info = client.call("conversations.info", channel=cid)
             channel = info.get("channel", {})
             access.name = channel.get("name", cid)
-            say(f"  [ok] channel visible: #{access.name} ({cid})")
+            access.is_private = bool(channel.get("is_private"))
+            say(f"  [ok] channel visible: #{access.name} ({cid})"
+                + (" [private]" if access.is_private else ""))
             client.call("conversations.history", channel=cid, limit=1)
             say(f"  [ok] channel readable: #{access.name}")
             access.ok = True
@@ -155,6 +175,10 @@ def check_access(
             say(f"  [x] {cid}: {access.reason}")
 
     readable = [c for c in report.channels if c.ok]
+    private = [c for c in readable if c.is_private]
+    if private:
+        say(f"  [ok] {len(private)} private channel(s) -> this machine only, "
+            "never the shared index")
     if report.discovered:
         # `*` is "whatever I can read", so a channel the token cannot read is not an
         # error -- it is the answer. An explicitly listed channel is different: a

@@ -318,11 +318,22 @@ def slack_source(say: Say = print) -> Source:
     if not report.ok:
         client.close()
         raise SourceUnavailable("\n".join(slack_check.verdict_lines(report)))
+    # `private=False` is the whole shared/private boundary, in one argument. This
+    # source feeds the company Elasticsearch, so it reads public channels and no
+    # others -- a private channel this token can see goes to the person's own
+    # machine instead (`provenance.local_agent`). The filter lives in `load_slack`
+    # rather than here so that every caller gets it, not just this one.
+    shared = report.readable(private=False)
+    private = report.readable(private=True)
+    say(f"  [ok] shared index: {len(shared)} public channel(s)")
+    if private:
+        say(f"  [ok] {len(private)} private channel(s) held back for this machine")
     return Source(
-        load=lambda oldest: slack_live.load_slack(client, report, oldest),
+        load=lambda oldest: slack_live.load_slack(client, report, oldest,
+                                                  private=False, say=say),
         label="slack",
         detail={"workspace": config.SLACK_WORKSPACE, "team_id": config.SLACK_TEAM_ID,
-                "channels": config.SLACK_CHANNEL_IDS},
+                "channels": [c.channel_id for c in shared], "scope": "public"},
         close=client.close,
     )
 

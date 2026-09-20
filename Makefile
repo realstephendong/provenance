@@ -5,7 +5,7 @@ PY := .venv/bin/python
 
 .PHONY: install es seed ingest ingest-incremental reconcile serve mcp eval calibrate \
         extension demo clean slack-check ingest-slack ingest-slack-incremental reconcile-slack \
-        slackbot deploy deploy-logs deploy-down
+        slackbot deploy deploy-logs deploy-down local local-status local-purge
 
 install:
 	$(PYTHON) -m venv .venv
@@ -63,6 +63,23 @@ deploy-down:
 
 serve:
 	.venv/bin/uvicorn provenance.service.main:app --reload --port 8000
+
+# --- the private half of Backfill (this machine only) ---------------------------
+# Normally the extension starts the connector and you never run these. They exist so
+# a person can see and delete their own private index without the editor's
+# cooperation -- a deletion you can only reach through the UI that created the data
+# is not really a deletion.
+#
+# Pin the port if you use the browser sign-in: Slack matches the redirect URL exactly.
+#   PROVENANCE_LOCAL_PORT=51737 make local
+local:
+	$(PY) -m provenance.local_agent.main serve
+
+local-status:
+	$(PY) -m provenance.local_agent.main status
+
+local-purge:
+	$(PY) -m provenance.local_agent.main purge
 
 mcp:
 	$(PY) -m provenance.mcp_server.server

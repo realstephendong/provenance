@@ -16,6 +16,12 @@ NodeType = Literal[
     "Code", "Commit", "PullRequest", "SlackThread", "Ticket", "SentryIssue", "Person",
 ]
 Confidence = Literal["exact", "llm-flagged"]
+# Which half of the Backfill press produced this. `workspace_shared` is the company
+# index everyone here can search; `user_private` is a private channel indexed on this
+# machine, which nobody else can retrieve. Carried all the way to the badge in the
+# panel, because "who else can see this?" is not something to infer from a channel
+# name.
+RetrievalScope = Literal["workspace_shared", "user_private"]
 
 # --- POST /context ----------------------------------------------------------
 
@@ -60,6 +66,10 @@ class Result(BaseModel):
     match_type: MatchType
     score: float
     raw_text: str = ""
+    scope: RetrievalScope = "workspace_shared"
+    # The words shown to a person: "Workspace" or "Only visible to you". Sent rather
+    # than derived client-side so every surface says the same thing.
+    display_scope: str = "Workspace"
 
 
 class CommitInfo(BaseModel):
@@ -104,6 +114,8 @@ class GraphNode(BaseModel):
     type: NodeType
     label: str
     data: dict = Field(default_factory=dict)
+    scope: RetrievalScope = "workspace_shared"
+    display_scope: str = "Workspace"
 
 
 class GraphEdge(BaseModel):

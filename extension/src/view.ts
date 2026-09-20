@@ -1,7 +1,9 @@
 import { createHash } from 'crypto';
 import * as vscode from 'vscode';
 import { getIngestStatus, postContext, postIngestSync } from './api';
+import { fuse, scopeCounts } from './fusion';
 import { renderGraph } from './graph';
+import { LocalAgent } from './localAgent';
 import { ContextResponse, IngestStatus, Result, Selection } from './types';
 
 // The stage list is indicative, not observed: /context is a single blocking call with
@@ -72,7 +74,10 @@ export class ProvenanceViewProvider implements vscode.WebviewViewProvider {
   private lastFailure: Selection | undefined;
   private timelinePanel: vscode.WebviewPanel | undefined;
 
-  constructor(private readonly serviceUrl: () => string) {}
+  constructor(
+    private readonly serviceUrl: () => string,
+    private readonly local: LocalAgent,
+  ) {}
 
   resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view;
@@ -194,21 +199,41 @@ export class ProvenanceViewProvider implements vscode.WebviewViewProvider {
     this.lastFailure = undefined;
     this.showLoading(selection);
 
-    try {
-      const response = await postContext(this.serviceUrl(), selection);
-      this.stopLoading();
-      const entry: Entry = { key, selection, response, at: Date.now() };
-      this.remember(entry);
-      this.activeKey = key;
-      this.renderEntry(entry, false);
-    } catch (err) {
-      this.stopLoading();
+    // Both planes at once. They are independent -- different processes, different
+    // credentials, different stores -- so waiting for one before starting the other
+    // would add its whole latency for nothing. Neither can fail the other: the
+    // service being down still shows private evidence, and a connector that is off
+    // or not signed in simply contributes none.
+    const sharedCall = postContext(this.serviceUrl(), selection);
+    const localCall = await this.local.ensure()
+      ? this.local.context(selection)
+      : Promise.resolve(undefined);
+
+    const [sharedOutcome, localOutcome] = await Promise.allSettled([sharedCall, localCall]);
+    this.stopLoading();
+
+    if (sharedOutcome.status === 'rejected' && localOutcome.status !== 'fulfilled') {
       this.lastFailure = selection;
       this.post({
         type: 'render',
-        html: this.chrome(errorFragment(this.serviceUrl(), String(err))),
+        html: this.chrome(errorFragment(this.serviceUrl(), String(sharedOutcome.reason))),
       });
+      return;
     }
+
+    const response = fuse({
+      shared: sharedOutcome.status === 'fulfilled' ? sharedOutcome.value : undefined,
+      local: localOutcome.status === 'fulfilled' ? localOutcome.value : undefined,
+      localError: localOutcome.status === 'rejected' ? String(localOutcome.reason) : undefined,
+    });
+    if (sharedOutcome.status === 'rejected') {
+      response.error = `workspace results unavailable: ${String(sharedOutcome.reason)}`;
+    }
+
+    const entry: Entry = { key, selection, response, at: Date.now() };
+    this.remember(entry);
+    this.activeKey = key;
+    this.renderEntry(entry, false);
   }
 
   private remember(entry: Entry): void {
@@ -363,31 +388,109 @@ export class ProvenanceViewProvider implements vscode.WebviewViewProvider {
    * and a timestamp chosen here would drift from the one `python -m provenance.ingest`
    * writes. The panel only says "catch up" and reports what came back.
    */
+  /**
+   * Make sure the private half can run: connector up, Slack connected, consent given.
+   *
+   * Each step explains what it is for rather than failing with a status code, because
+   * each one is a decision about someone's own data and they cannot make it from a
+   * 401. Returns false when the person declines, and the press proceeds with the
+   * shared half alone.
+   */
+  private async ensurePrivateReady(): Promise<boolean> {
+    if (!await this.local.ensure()) { return false; }
+
+    const status = await this.local.status();
+    if (!status.slack.signed_in) {
+      const choice = await vscode.window.showInformationMessage(
+        'Connect your Slack account so Provenance can index the private channels you '
+        + 'can read. They stay on this machine; the shared index never sees them.',
+        'Connect Slack', 'Paste a token', 'Skip',
+      );
+      if (choice === 'Connect Slack') {
+        const { authorize_url } = await this.local.startSlackAuth();
+        await vscode.env.openExternal(vscode.Uri.parse(authorize_url));
+        void vscode.window.showInformationMessage(
+          'Approve it in your browser, then press Backfill again.',
+        );
+        return false;
+      }
+      if (choice !== 'Paste a token') { return false; }
+      const token = await vscode.window.showInputBox({
+        title: 'Slack user token', password: true, ignoreFocusOut: true,
+        prompt: 'A user token (xoxp-...). A bot token cannot read your private channels.',
+      });
+      if (!token) { return false; }
+      if (!(await this.local.importSlackToken(token)).signed_in) { return false; }
+    }
+
+    if (!status.consent.granted) {
+      const choice = await vscode.window.showWarningMessage(
+        status.consent.text, { modal: true }, 'I agree',
+      );
+      if (choice !== 'I agree') { return false; }
+      await this.local.setConsent(true);
+    }
+    return true;
+  }
+
+  /**
+   * Index everything posted since the last sync -- in both planes.
+   *
+   * One press, two destinations. Public channels go to the company Elasticsearch
+   * through the service; private channels go to the encrypted store on this machine
+   * through the connector. They run in parallel and neither can write to the other's
+   * store, which is the whole point of there being two of them.
+   *
+   * The window is each side's to decide, not the panel's: each holds its own
+   * checkpoint, and a timestamp chosen here would drift from the one
+   * `python -m provenance.ingest` writes.
+   */
   private async backfill(): Promise<void> {
     if (this.ingestBusy) { return; }
     this.ingestBusy = true;
     this.postStatusBar('Reading Slack and indexing what is new…',
                        { busy: true, label: 'Backfilling…' });
-    try {
-      const result = await postIngestSync(this.serviceUrl());
-      this.ingestBusy = false;
-      const through = result.covered_through ? ` · through ${formatTs(result.covered_through)}` : '';
-      this.postStatusBar(
-        result.new_messages === 0
-          ? `Already up to date${through}`
-          : `Indexed ${plural(result.indexed, 'conversation')} from `
-            + `${plural(result.new_messages, 'new message')}${through}`,
-        { title: result.log.join('\n') },
-      );
-    } catch (err) {
-      this.ingestBusy = false;
-      const detail = err instanceof Error ? err.message : String(err);
+
+    const wantsPrivate = await this.ensurePrivateReady();
+    const sharedCall = postIngestSync(this.serviceUrl());
+    const localCall = wantsPrivate ? this.local.backfill() : Promise.resolve(undefined);
+    const [shared, local] = await Promise.allSettled([sharedCall, localCall]);
+    this.ingestBusy = false;
+
+    if (shared.status === 'rejected') {
+      const detail = shared.reason instanceof Error
+        ? shared.reason.message : String(shared.reason);
       // The service's refusals are paragraphs -- a missing scope and how to add it, a
       // corpus mismatch and how to resolve it. The bar is one line, so it says that it
       // failed and the notification carries the instructions.
       this.postStatusBar('Backfill failed', { isError: true, title: detail });
       vscode.window.showErrorMessage(`Provenance backfill: ${detail}`);
+      return;
     }
+
+    const result = shared.value;
+    const through = result.covered_through
+      ? ` · through ${formatTs(result.covered_through)}` : '';
+    const workspaceNote = result.new_messages === 0
+      ? `Already up to date${through}`
+      : `Indexed ${plural(result.indexed, 'conversation')} from `
+        + `${plural(result.new_messages, 'new message')}${through}`;
+
+    const lines = [...result.log];
+    let privateNote = '';
+    if (local.status === 'fulfilled' && local.value) {
+      // Named separately, always. Folding the two counts into one number would hide
+      // exactly the fact this feature exists to make visible.
+      privateNote = local.value.indexed > 0
+        ? ` · ${plural(local.value.indexed, 'private conversation')} on this machine`
+        : '';
+      lines.push('', 'private (this machine only):', ...local.value.log);
+    } else if (local.status === 'rejected') {
+      privateNote = ' · private half failed';
+      lines.push('', `private half failed: ${String(local.reason)}`);
+    }
+
+    this.postStatusBar(workspaceNote + privateNote, { title: lines.join('\n') });
   }
 
   /** Copy the findings as markdown and append them to `.provenance/context.md` in
@@ -638,8 +741,17 @@ function resultFragment(entry: Entry, cached: boolean): string {
   const timings = Object.entries(response.timing_ms)
     .map(([k, v]) => `${escapeHtml(k)} ${v}ms`).join(' · ');
 
+  // Where the evidence came from, spelled out. "3 results" reads very differently
+  // once you know one of them is only visible to you.
+  const counts = scopeCounts(response.results);
+  const provenanceOfEvidence = response.results.length === 0 ? '' : [
+    counts.workspace > 0 ? `${counts.workspace} from the workspace index` : '',
+    counts.private > 0 ? `${counts.private} private, on this machine` : '',
+  ].filter(Boolean).join(' · ');
+
   parts.push(`
     <footer>
+      ${provenanceOfEvidence ? `<p class="muted">${escapeHtml(provenanceOfEvidence)}</p>` : ''}
       <button id="send-to-agent">Send to agent</button>
       ${timings ? `<details class="more"><summary>Timing</summary><p class="muted">${timings}</p></details>` : ''}
     </footer>`);
@@ -673,12 +785,22 @@ function truncate(value: string, limit: number): string {
 
 function resultCard(result: Result, index: number): string {
   const isExact = result.match_type === 'exact';
+  const isPrivate = result.scope === 'user_private';
   const people = result.participants.join(', ');
+  // The scope badge comes first in the head, before the channel name. "Can anyone
+  // else see this?" has to be answered before the content is read, not after someone
+  // has already pasted it into a ticket.
   return `
-    <details class="card ${isExact ? 'exact' : ''}" id="result-${index}">
+    <details class="card ${isExact ? 'exact' : ''} ${isPrivate ? 'private' : ''}" id="result-${index}">
       <summary>
         <span class="card-head">
           <strong>[${index}]</strong>
+          <span class="tag scope ${isPrivate ? 'private' : ''}"
+                title="${isPrivate
+                  ? 'Indexed on this machine from a private channel. Nobody else can retrieve it.'
+                  : 'In the workspace index. Everyone who can use Provenance here can retrieve it.'}">
+            ${isPrivate ? '&#128274; ' : ''}${escapeHtml(result.display_scope)}
+          </span>
           <span class="tag ${isExact ? 'exact' : ''}">${isExact ? 'exact match' : 'semantic'}</span>
           <span>#${escapeHtml(result.channel_name)}</span>
           <span class="muted">${escapeHtml(result.date)}</span>
@@ -785,6 +907,15 @@ const STYLES = `
   .card { border: 1px solid var(--vscode-panel-border); border-radius: 6px;
           padding: 9px 11px; margin-bottom: 9px; overflow-wrap: anywhere; }
   .card.exact { border-left: 3px solid var(--vscode-charts-blue, #4a9eff); }
+  /* A private card is drawn differently, not only labelled: on a long evidence list
+     a badge is easy to skim past, and the cost of skimming past it is quoting a
+     private channel as though the whole company had seen it. */
+  .card.private { border-left: 3px solid var(--vscode-charts-purple, #b180d7); }
+  .tag.scope { border-color: var(--vscode-charts-blue, #4a9eff); }
+  .tag.scope.private {
+    border-color: var(--vscode-charts-purple, #b180d7);
+    color: var(--vscode-charts-purple, #b180d7);
+  }
   .card.flash { animation: flash 1.1s ease; }
   @keyframes flash { from { background: var(--vscode-editor-findMatchHighlightBackground, rgba(255,214,0,0.35)); } }
   .card > summary { cursor: pointer; user-select: none; }

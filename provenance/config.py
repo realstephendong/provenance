@@ -334,3 +334,54 @@ SLACK_BOT_HISTORY_MESSAGES = 200
 # Added to the conversation in Slack after indexing, so the next `make ingest-slack`
 # keeps a unit that is under MIN_MESSAGES_PER_UNIT. Must be in TRIGGER_EMOJI.
 SLACK_BOT_PIN_EMOJI = "pushpin"
+
+
+# --- The private plane: one person, one machine ---------------------------------
+# The Backfill button has two halves. Public channels go to the shared company
+# Elasticsearch through `ingest.sync`. Private channels go here: an encrypted store
+# on this developer's own machine, read with their own Slack token, never sent
+# anywhere. `provenance.local_agent` is the whole of it.
+#
+# Nothing in this block belongs in a shared deployment's environment. The Slack
+# token lives in the OS credential store, not in .env -- see local_agent/keychain.py.
+
+SCOPE_SHARED = "workspace_shared"
+SCOPE_PRIVATE = "user_private"
+# What the editor shows beside a result. The words matter: "Workspace" is a claim
+# about who else can see this, not about where it happens to be stored.
+DISPLAY_SCOPE = {SCOPE_SHARED: "Workspace", SCOPE_PRIVATE: "Only visible to you"}
+
+
+def display_scope(scope: str) -> str:
+    return DISPLAY_SCOPE.get(scope, scope)
+
+
+# The connector binds loopback only; see local_agent/main.py for why that is not a
+# setting. Port 0 picks an ephemeral one and reports it on stdout. Slack's OAuth
+# redirect has to match exactly, so pin the port if you use the browser sign-in.
+LOCAL_AGENT_HOST = "127.0.0.1"
+LOCAL_AGENT_PORT = int(os.environ.get("PROVENANCE_LOCAL_PORT", "0"))
+LOCAL_PROFILE_DIR = Path(
+    os.environ.get("PROVENANCE_LOCAL_DIR", str(Path.home() / ".provenance"))
+).expanduser()
+LOCAL_DEFAULT_PROFILE = "default"
+
+# Slack Authorization Code + PKCE, run on the device. The client id is not a secret;
+# a public client has no client secret at all, which is the point -- nothing on the
+# laptop is a credential that could impersonate the app.
+SLACK_CLIENT_ID = os.environ.get("SLACK_CLIENT_ID", "").strip()
+SLACK_OAUTH_AUTHORIZE_URL = "https://slack.com/oauth/v2/authorize"
+SLACK_USER_SCOPES = [
+    "channels:history", "channels:read",
+    "groups:history", "groups:read",
+    "users:read",
+]
+LOCAL_OAUTH_STATE_TTL_SECONDS = 600
+
+# Summarizing and embedding a private conversation sends its text to a model
+# provider. For public channels the company decided that once; for someone's private
+# channels only they can decide it, so it is recorded per profile and checked before
+# a single private character leaves the machine. Versioned: change the terms and the
+# old agreement lapses rather than carrying over.
+LOCAL_CONSENT_VERSION = "remote-processing-v1"
+LOCAL_RETRIEVE_LIMIT = 20
