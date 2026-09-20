@@ -1350,10 +1350,28 @@ const CLIENT_SCRIPT = `
       });
     }
 
+    function clearSelection() {
+      nodeEls.forEach(function (n) { n.classList.remove('selected'); });
+      if (document.activeElement instanceof HTMLElement ||
+          document.activeElement instanceof SVGElement) {
+        document.activeElement.blur();   // otherwise the focus ring outlives the click
+      }
+      if (details) {
+        details.classList.add('empty');
+        details.textContent = 'Click a node above for its full detail.';
+      }
+    }
+
+    // Node clicks stop propagating, so a click that reaches the canvas landed on
+    // empty space: treat it as "nothing is selected" rather than leaving the last
+    // card ringed with no way to undo it.
+    outer.addEventListener('click', clearSelection);
+
     nodeEls.forEach(wire);
     chipEls.forEach(wire);
 
     destroyGraph = function () {
+      outer.removeEventListener('click', clearSelection);
       outer.removeEventListener('wheel', onWheel);
       outer.removeEventListener('mousedown', onDown);
       window.removeEventListener('mousemove', onMove);
