@@ -8,6 +8,14 @@ const COUNT_TIMEOUT_MS = 5_000;
 const SYNC_TIMEOUT_MS = 15 * 60_000;
 const STATUS_TIMEOUT_MS = 5_000;
 
+function originOf(url: string): string {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return url;
+  }
+}
+
 async function request<T>(
   url: string, timeoutMs: number, init: RequestInit = {},
 ): Promise<T> {
@@ -28,6 +36,14 @@ async function request<T>(
   } catch (err) {
     if (err instanceof Error && err.name === 'AbortError') {
       throw new Error(`request timed out after ${timeoutMs / 1000}s`);
+    }
+    // Node's fetch collapses every connection-level failure -- refused, DNS, reset --
+    // into a bare `TypeError: fetch failed`, which tells a reader nothing and is
+    // almost always one thing: the service is not running.
+    if (err instanceof TypeError) {
+      throw new Error(
+        `could not connect to ${originOf(url)} — is the Provenance service running? (\`make serve\`)`,
+      );
     }
     throw err;
   } finally {
