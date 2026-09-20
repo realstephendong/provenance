@@ -19,6 +19,8 @@ export interface ContextRequest {
   line_start: number;
   line_end: number;
   language?: string | null;
+  github_repo?: string;
+  precomputed_blame?: Record<string, unknown>;
 }
 
 export interface Result {
@@ -107,4 +109,6 @@ export interface Selection {
   line_start: number;
   line_end: number;
   language?: string;
+  github_repo?: string;
+  precomputed_blame?: Record<string, unknown>;
 }

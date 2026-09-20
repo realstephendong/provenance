@@ -27,6 +27,11 @@ class ContextRequest(BaseModel):
     line_start: int          # 1-indexed, inclusive
     line_end: int             # 1-indexed, inclusive
     language: str | None = None
+    # Optional because CLI/MCP callers may still use the configured repository.
+    # The extension supplies this from the workspace's origin remote so a central
+    # GitHub App can select the matching installation without per-repo env vars.
+    github_repo: str = ""          # "owner/repo"
+    precomputed_blame: dict | None = None
 
     @field_validator("line_end")
     @classmethod

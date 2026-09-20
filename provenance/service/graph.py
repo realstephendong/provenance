@@ -76,7 +76,8 @@ def resolve(
                 f"sentry:{issue['id']}", "SentryIssue", issue["id"],
                 {"title": issue.get("title"), "status": issue.get("status"),
                  "first_seen": issue.get("first_seen"),
-                 "ts": _epoch(issue.get("first_seen"))},
+                 "ts": _epoch(issue.get("first_seen")),
+                 "external_url": issue.get("url"), "external_label": "Open in Sentry"},
             )
             edges.append(models.GraphEdge(
                 source=pr_id, target=issue_id, type="RELATED_TO", confidence="exact"
@@ -99,6 +100,8 @@ def resolve(
                 "author": gh.get("author"),
                 "merged_at": gh.get("merged_at"),
                 "ts": fallback_ts if merged_ts is None else merged_ts,
+                "external_url": github.pull_request_url(pr),
+                "external_label": "Open on GitHub",
             })
         attach_pr_context(pr_id, pr)
         return pr_id
@@ -199,7 +202,7 @@ def resolve(
                 "date": p.get("date_str"),
                 "ts": p.get("ts_start"),
                 "permalink": p.get("permalink"),
-                "summary": p.get("summary", "")[:200],
+                "summary": p.get("summary", ""),
             },
         )
         slack_ids.append(slack_id)
@@ -233,6 +236,8 @@ def resolve(
                     "merged_at": gh.get("merged_at"),
                     # Undated by the forge: sit it with the thread that named it.
                     "ts": p.get("ts_start") if merged_ts is None else merged_ts,
+                    "external_url": github.pull_request_url(pr),
+                    "external_label": "Open on GitHub",
                 })
                 edges.append(models.GraphEdge(
                     source=slack_id, target=pr_id, type="REFERENCES", confidence="exact"
@@ -279,6 +284,7 @@ def resolve(
                     node(issue_id, "SentryIssue", issue["id"], {
                         "title": issue.get("title"), "status": issue.get("status"),
                         "first_seen": issue.get("first_seen"),
+                        "external_url": issue.get("url"), "external_label": "Open in Sentry",
                     })
             if issue_id in nodes:
                 edges.append(models.GraphEdge(

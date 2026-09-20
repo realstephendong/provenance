@@ -27,12 +27,17 @@ services:
     env_file: .env
     environment:
       ELASTICSEARCH_URL: http://elasticsearch:9200
+      GITHUB_APP_PRIVATE_KEY_PATH: /run/secrets/github-app-private-key.pem
     command: uvicorn provenance.service.main:app --host 0.0.0.0 --port 8000
     depends_on:
       elasticsearch:
         condition: service_healthy
     ports:
       - "${PROVENANCE_API_BIND:-127.0.0.1:8000}:8000"
+    volumes:
+      # `/dev/null` only makes `docker compose down` usable before GitHub App
+      # configuration exists. The Makefile rejects a real deployment without a key.
+      - "${GITHUB_APP_PRIVATE_KEY_FILE:-/dev/null}:/run/secrets/github-app-private-key.pem:ro"
     restart: unless-stopped
 
   slackbot:

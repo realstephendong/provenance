@@ -60,10 +60,16 @@ USE_MOCK_DATA = os.environ.get("USE_MOCK_DATA", "true").strip().lower() not in {
 # NB: SENTRY_DSN above is unrelated -- that is where we *send* our own traces.
 # SENTRY_API_TOKEN below is what we *read* issues with.
 GITHUB_API = os.environ.get("GITHUB_API", "https://api.github.com").rstrip("/")
+GITHUB_WEB_URL = os.environ.get("GITHUB_WEB_URL", "https://github.com").rstrip("/")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "").strip()            # "owner/name"
+# Preferred shared-deployment credentials. The private key stays in the deployment
+# secret store; this is a file path, never the PEM value itself.
+GITHUB_APP_ID = os.environ.get("GITHUB_APP_ID", "").strip()
+GITHUB_APP_PRIVATE_KEY_PATH = os.environ.get("GITHUB_APP_PRIVATE_KEY_PATH", "").strip()
 
 SENTRY_API = os.environ.get("SENTRY_API", "https://sentry.io/api/0").rstrip("/")
+SENTRY_WEB_URL = os.environ.get("SENTRY_WEB_URL", "https://sentry.io").rstrip("/")
 SENTRY_API_TOKEN = os.environ.get("SENTRY_API_TOKEN", "").strip()
 SENTRY_ORG = os.environ.get("SENTRY_ORG", "").strip()
 SENTRY_PROJECT = os.environ.get("SENTRY_PROJECT", "").strip()
@@ -85,11 +91,14 @@ def require_live_integrations() -> None:
     USE_MOCK_DATA off it is the only thing that can put a title, an author or a merge
     date on the PR chain -- without it every PR node is a bare number.
     """
-    if USE_MOCK_DATA or (GITHUB_TOKEN and GITHUB_REPO):
+    if USE_MOCK_DATA or (GITHUB_TOKEN and GITHUB_REPO) or (
+        GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY_PATH
+    ):
         return
     raise MissingCredentials(
-        "USE_MOCK_DATA is false but GITHUB_TOKEN / GITHUB_REPO are not set.\n"
-        "  add both to .env, or set USE_MOCK_DATA=true to run on the seed fixtures"
+        "USE_MOCK_DATA is false but no GitHub credentials are set.\n"
+        "  set GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY_PATH (preferred), or "
+        "GITHUB_TOKEN + GITHUB_REPO, or set USE_MOCK_DATA=true"
     )
 
 # These run on the request path inside `resolve_graph`, so the timeout is deliberately
