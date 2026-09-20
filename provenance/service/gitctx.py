@@ -121,6 +121,14 @@ def sha_to_pr(
     if match:
         return _remember(repo_root, sha, int(match.group(1)))
 
+    # A merge commit belongs to its own pull request. Blame attributes a line to a
+    # merge only where that line came from conflict resolution, which is rare -- but
+    # the walk below starts at `sha..HEAD` and so can never find the commit itself,
+    # so those lines lost their PR entirely.
+    own = _MERGE_SUBJECT.search(subject)
+    if own:
+        return _remember(repo_root, sha, int(own.group(1)))
+
     try:
         ancestry = _git(
             repo_root, "log", "--merges", "--ancestry-path", "--reverse",
