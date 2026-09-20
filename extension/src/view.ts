@@ -1316,8 +1316,13 @@ const CLIENT_SCRIPT = `
         renderDetails(node);
         return;
       }
-      if (typeof data.permalink === 'string' && data.permalink) {
-        vscodeApi.postMessage({ type: 'openLink', url: data.permalink });
+      // No evidence card to land on, so leave the editor: the thread in Slack, or
+      // the PR / issue on the forge that resolved this node.
+      const external = typeof data.permalink === 'string' && data.permalink
+        ? data.permalink
+        : (typeof data.external_url === 'string' ? data.external_url : '');
+      if (external) {
+        vscodeApi.postMessage({ type: 'openLink', url: external });
         renderDetails(node);
         return;
       }
