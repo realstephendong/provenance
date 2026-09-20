@@ -1,8 +1,8 @@
 import { createHash } from 'crypto';
 import * as vscode from 'vscode';
-import { postContext } from './api';
+import { getIngestStatus, postContext, postIngestSync } from './api';
 import { renderGraph } from './graph';
-import { ContextResponse, Result, Selection } from './types';
+import { ContextResponse, IngestStatus, Result, Selection } from './types';
 
 // The stage list is indicative, not observed: /context is a single blocking call with
 // no progress channel, so this rotates on a timer. Real per-stage numbers arrive with
@@ -64,6 +64,9 @@ export class ProvenanceViewProvider implements vscode.WebviewViewProvider {
   private loadingTimer: NodeJS.Timeout | undefined;
   private readyWaiters: (() => void)[] = [];
 
+  /** A sync is one-at-a-time in the service too; this keeps the panel from asking. */
+  private ingestBusy = false;
+
   private history: Entry[] = [];
   private activeKey: string | undefined;
   private lastFailure: Selection | undefined;
@@ -103,6 +106,10 @@ export class ProvenanceViewProvider implements vscode.WebviewViewProvider {
     } else {
       void this.view?.webview.postMessage({ type: 'render', html: emptyFragment() });
     }
+    // A webview view is rebuilt from the shell when it is re-shown, so the bar comes
+    // back empty; ask the service where the index stands again rather than caching it.
+    void this.refreshIngestStatus();
+
     const waiters = this.readyWaiters;
     this.readyWaiters = [];
     for (const waiter of waiters) { waiter(); }
@@ -132,6 +139,9 @@ export class ProvenanceViewProvider implements vscode.WebviewViewProvider {
         return;
       case 'sendToAgent':
         await this.sendToAgent();
+        return;
+      case 'backfill':
+        await this.backfill();
         return;
       case 'showHistory':
         if (message.key) { this.showHistory(message.key); }
@@ -317,6 +327,69 @@ export class ProvenanceViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  // --- indexing --------------------------------------------------------------
+
+  private postStatusBar(
+    note: string,
+    opts: { busy?: boolean; label?: string; isError?: boolean; title?: string } = {},
+  ): void {
+    this.post({
+      type: 'statusbar',
+      note,
+      busy: opts.busy ?? this.ingestBusy,
+      label: opts.label ?? 'Backfill',
+      isError: opts.isError ?? false,
+      title: opts.title ?? '',
+    });
+  }
+
+  /** Read the coverage line off the service. Never blocks a press; never hits Slack. */
+  private async refreshIngestStatus(): Promise<void> {
+    if (this.ingestBusy) { return; }
+    try {
+      const status = await getIngestStatus(this.serviceUrl());
+      this.postStatusBar(coverageNote(status), { title: channelDetail(status.channels) });
+    } catch {
+      // History is served from memory, so the panel is useful with the service down.
+      // Painting an error across the bar would overstate what is broken.
+      this.postStatusBar('');
+    }
+  }
+
+  /**
+   * Index everything posted since the last sync.
+   *
+   * The window is the service's to decide, not the panel's: it holds the checkpoint,
+   * and a timestamp chosen here would drift from the one `python -m provenance.ingest`
+   * writes. The panel only says "catch up" and reports what came back.
+   */
+  private async backfill(): Promise<void> {
+    if (this.ingestBusy) { return; }
+    this.ingestBusy = true;
+    this.postStatusBar('Reading Slack and indexing what is new…',
+                       { busy: true, label: 'Backfilling…' });
+    try {
+      const result = await postIngestSync(this.serviceUrl());
+      this.ingestBusy = false;
+      const through = result.covered_through ? ` · through ${formatTs(result.covered_through)}` : '';
+      this.postStatusBar(
+        result.new_messages === 0
+          ? `Already up to date${through}`
+          : `Indexed ${plural(result.indexed, 'conversation')} from `
+            + `${plural(result.new_messages, 'new message')}${through}`,
+        { title: result.log.join('\n') },
+      );
+    } catch (err) {
+      this.ingestBusy = false;
+      const detail = err instanceof Error ? err.message : String(err);
+      // The service's refusals are paragraphs -- a missing scope and how to add it, a
+      // corpus mismatch and how to resolve it. The bar is one line, so it says that it
+      // failed and the notification carries the instructions.
+      this.postStatusBar('Backfill failed', { isError: true, title: detail });
+      vscode.window.showErrorMessage(`Provenance backfill: ${detail}`);
+    }
+  }
+
   /** Copy the findings as markdown and append them to `.provenance/context.md` in
    *  the workspace, which is where a coding agent is pointed to pick them up. */
   private async sendToAgent(): Promise<void> {
@@ -376,12 +449,69 @@ ${STYLES}
 </head>
 <body>
 <div id="app"></div>
+<!-- Outside #app on purpose: fragments replace that whole subtree on every render,
+     and indexing is not a property of the selection being explained. The bar is the
+     one control that is always available, including before the first query. -->
+<div id="statusbar">
+  <span class="sb-note" id="sb-note">&nbsp;</span>
+  <button id="backfill" title="Index Slack messages posted since the last sync">Backfill</button>
+</div>
 <script>
 ${CLIENT_SCRIPT}
 </script>
 </body>
 </html>`;
   }
+}
+
+// --- the status bar ----------------------------------------------------------
+
+function plural(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? '' : 's'}`;
+}
+
+/** Slack timestamps are epoch seconds; the bar shows them in the reader's timezone. */
+function formatTs(ts: number): string {
+  return new Date(ts * 1000).toLocaleString(undefined, {
+    month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+  });
+}
+
+/**
+ * The scope suffix: how many channels ingest is pointed at.
+ *
+ * Worth the pixels because a narrow `SLACK_CHANNEL_IDS` is invisible otherwise --
+ * backfill happily reports success having read one channel of fourteen, and the only
+ * symptom is a graph with no Slack in it.
+ */
+function scopeNote(scope: string | number | undefined): string {
+  if (scope === undefined) { return ''; }
+  if (scope === '*') { return ' · all channels'; }
+  const count = Number(scope);
+  return Number.isFinite(count) ? ` · ${plural(count, 'channel')}` : '';
+}
+
+function coverageNote(status: IngestStatus): string {
+  const scope = scopeNote(status.scope);
+  if (status.never_run) {
+    return `Nothing indexed yet · Backfill reads the whole history${scope}`;
+  }
+  if (status.covered_through === null) { return ''; }
+  const docs = status.docs === undefined ? '' : ` · ${plural(status.docs, 'conversation')}`;
+  return `Indexed through ${formatTs(status.covered_through)}${docs}${scope}`;
+}
+
+/**
+ * The per-channel detail, for the bar's tooltip.
+ *
+ * The bar itself shows the *oldest* channel's timestamp, because that is the point
+ * the whole index is genuinely caught up to. Which channel is lagging only matters
+ * once someone asks, so it lives in the hover.
+ */
+function channelDetail(channels: Record<string, number>): string {
+  const names = Object.keys(channels).sort();
+  if (names.length === 0) { return ''; }
+  return names.map((name) => `#${name} — ${formatTs(channels[name])}`).join('\n');
 }
 
 // --- fragments ---------------------------------------------------------------
@@ -624,7 +754,22 @@ const STYLES = `
     background: var(--vscode-sideBar-background, var(--vscode-editor-background));
     padding: 10px 12px 28px; line-height: 1.5; font-size: 0.9rem;
     overflow-wrap: anywhere;
+    /* Leave room for the fixed status bar so the last card is never under it. */
+    padding-bottom: 46px;
   }
+  /* Bottom-right, mirroring "Send to agent" at the bottom left of the report. */
+  #statusbar {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 12px;
+    background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+    border-top: 1px solid var(--vscode-panel-border);
+  }
+  .sb-note { flex: 1; min-width: 0; font-size: 0.72rem; opacity: 0.6;
+             white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sb-note.error { color: var(--vscode-errorForeground); opacity: 0.9;
+                   white-space: normal; }
+  #backfill[disabled] { opacity: 0.55; cursor: default; }
   h1 { font-size: 0.98rem; margin: 0 0 4px; font-weight: 600; word-break: break-all; }
   h2 { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em;
        opacity: 0.65; margin: 18px 0 8px; font-weight: 600; display: inline; }
@@ -733,15 +878,38 @@ const STYLES = `
   .graph-svg .stub { stroke: var(--vscode-foreground); stroke-opacity: 0.3; stroke-width: 1.4; }
   .graph-svg .dot { stroke: var(--vscode-editor-background); stroke-width: 2; }
 
-  .graph-svg .node rect { fill: var(--vscode-editorWidget-background);
+  .graph-svg .node .card { fill: var(--vscode-editorWidget-background);
                           stroke: var(--vscode-panel-border); stroke-width: 1.2; }
   .graph-svg .node .accent { opacity: 0.95; stroke: none; }
   .graph-svg .node { cursor: pointer; transition: opacity 120ms ease; }
-  .graph-svg .node:hover rect:not(.accent), .graph-svg .node:focus rect:not(.accent),
-  .graph-svg .node.active rect:not(.accent) { stroke: var(--vscode-focusBorder); stroke-width: 2; }
+  .graph-svg .node:hover .card, .graph-svg .node:focus .card,
+  .graph-svg .node.active .card, .graph-svg .node.selected .card {
+    stroke: var(--vscode-focusBorder); stroke-width: 2;
+  }
   .graph-svg .node.dimmed, .graph-svg .chip-node.dimmed { opacity: 0.25; }
-  .graph-svg .node.selected rect:not(.accent) { stroke: var(--vscode-textLink-foreground); stroke-width: 2.5; }
   .graph-svg .node.linkable:hover .node-label { text-decoration: underline; }
+
+  /* The card's action, shown only for the card the pointer is actually on.
+     Deliberately not '.active': hovering one card marks everything it connects to
+     active, and an Open button on four cards at once says nothing about which one
+     is about to open. Not '.selected' either -- that outlives the pointer.
+     ':focus-visible' rather than ':focus' is the same rule for the keyboard: it
+     follows the tab ring, where ':focus' would also latch on to the last card
+     clicked and leave its button showing under the mouse's nose.
+     It is untouchable while invisible, so the corner of a card that is not being
+     hovered is still the card. */
+  .graph-svg .node-open { opacity: 0; pointer-events: none; transition: opacity 100ms ease; }
+  .graph-svg .node:hover .node-open, .graph-svg .node:focus-visible .node-open {
+    opacity: 1; pointer-events: all;
+  }
+  .graph-svg .node-open .open-bg { fill: var(--vscode-button-secondaryBackground, #3a3d41);
+                                   stroke: var(--vscode-panel-border); stroke-width: 1; }
+  .graph-svg .node-open text { font-size: 9px; font-weight: 600; letter-spacing: 0.02em;
+                               text-anchor: middle; dominant-baseline: central;
+                               fill: var(--vscode-button-secondaryForeground, #cccccc); }
+  .graph-svg .node-open:hover .open-bg { fill: var(--vscode-button-background, #0078d4);
+                                         stroke: var(--vscode-button-background, #0078d4); }
+  .graph-svg .node-open:hover text { fill: var(--vscode-button-foreground, #ffffff); }
 
   .graph-svg .n-code .accent, .graph-svg .n-code .node-glyph, .graph-svg circle.n-code { fill: var(--vscode-charts-blue, #4a9eff); }
   .graph-svg .n-commit .accent, .graph-svg .n-commit .node-glyph, .graph-svg circle.n-commit { fill: var(--vscode-charts-yellow, #cca700); }
@@ -752,15 +920,15 @@ const STYLES = `
   .graph-svg .n-person .accent, .graph-svg .n-person .node-glyph, .graph-svg circle.n-person { fill: var(--vscode-descriptionForeground); }
 
   .graph-svg .node-icon { font-size: 13px; }
-  /* The mark is scaled into place by a transform, so it must not also be stroked. */
+  /* The mark is scaled into place by a transform, so it must not also be stroked.
+     Subpaths that carry their own brand colour set it as a fill attribute on the
+     path, which outranks the accent colour they would otherwise inherit here. */
   .graph-svg .node-glyph { stroke: none; }
   .graph-svg .node-type { font-size: 8.5px; fill: var(--vscode-foreground); opacity: 0.55;
                           text-transform: uppercase; letter-spacing: 0.06em; }
   .graph-svg .node-date { font-size: 8.5px; fill: var(--vscode-foreground); opacity: 0.5;
                           text-anchor: end; font-family: var(--vscode-editor-font-family); }
   .graph-svg .node-label { font-size: 12px; fill: var(--vscode-foreground); font-weight: 600; }
-  .graph-svg .node-cite { font-size: 9.5px; font-weight: 700; text-anchor: end;
-                          fill: var(--vscode-textLink-foreground); }
   .graph-svg .node-subtitle { font-size: 9.5px; fill: var(--vscode-foreground); opacity: 0.6; }
 
   /* People and tickets ride inside their event's card, not as loose boxes. */
@@ -819,7 +987,7 @@ const STYLES = `
   .graph-legend { display: flex; flex-wrap: wrap; gap: 5px 9px; margin-top: 8px; }
   .legend-chip { font-size: 0.68rem; opacity: 0.8; display: inline-flex; align-items: center; gap: 4px;
                 border-left: 3px solid transparent; padding-left: 5px; }
-  .legend-glyph { width: 10px; height: 10px; flex: none; fill: currentColor; }
+  .legend-glyph { width: 13px; height: 13px; flex: none; fill: currentColor; }
   .legend-chip.n-code { border-color: var(--vscode-charts-blue, #4a9eff); }
   .legend-chip.n-commit { border-color: var(--vscode-charts-yellow, #cca700); }
   .legend-chip.n-pr { border-color: var(--vscode-charts-green, #89d185); }
@@ -859,6 +1027,18 @@ const CLIENT_SCRIPT = `
     } else if (message.type === 'stage') {
       const el = document.getElementById('stage-text');
       if (el) { el.textContent = message.text; }
+    } else if (message.type === 'statusbar') {
+      const note = document.getElementById('sb-note');
+      const button = document.getElementById('backfill');
+      if (note) {
+        note.textContent = message.note || '';
+        note.className = 'sb-note' + (message.isError ? ' error' : '');
+        note.title = message.title || '';
+      }
+      if (button) {
+        button.disabled = !!message.busy;
+        button.textContent = message.label || 'Backfill';
+      }
     }
   });
 
@@ -907,7 +1087,8 @@ const CLIENT_SCRIPT = `
 
     const button = target.closest('button');
     if (!button) { return; }
-    if (button.id === 'send-to-agent') { vscodeApi.postMessage({ type: 'sendToAgent' }); }
+    if (button.id === 'backfill') { vscodeApi.postMessage({ type: 'backfill' }); }
+    else if (button.id === 'send-to-agent') { vscodeApi.postMessage({ type: 'sendToAgent' }); }
     else if (button.id === 'refresh') { vscodeApi.postMessage({ type: 'refresh' }); }
     else if (button.id === 'retry') { vscodeApi.postMessage({ type: 'retry' }); }
     else if (button.id === 'reveal') { vscodeApi.postMessage({ type: 'reveal' }); }
@@ -1061,6 +1242,7 @@ const CLIENT_SCRIPT = `
     }
 
     const details = document.getElementById('node-details');
+    const INTERNAL_KEYS = new Set(['permalink', 'citation', 'external_url', 'external_label']);
     function escapeText(value) {
       const div = document.createElement('div');
       div.textContent = String(value);
@@ -1075,7 +1257,11 @@ const CLIENT_SCRIPT = `
       const data = node.data || {};
       const rows = Object.keys(data)
         .filter(function (key) {
-          return key !== 'permalink' && key !== 'external_url' && key !== 'external_label' && data[key] !== undefined && data[key] !== null && data[key] !== '';
+          // Internal bookkeeping, not detail for someone inspecting a node: the
+          // link keys are what the Open button reads, and citation is how the
+          // graph points back at an evidence card.
+          return !INTERNAL_KEYS.has(key) &&
+            data[key] !== undefined && data[key] !== null && data[key] !== '';
         })
         .map(function (key) {
           const value = Array.isArray(data[key]) ? data[key].join(', ') : data[key];
@@ -1117,6 +1303,32 @@ const CLIENT_SCRIPT = `
       if (citation) { focusEvidence(citation); }
     }
 
+    // The hover action takes a cited node to its evidence card. That card contains
+    // the actual external link, so this preserves the page's reading flow and gives
+    // the user the surrounding context before they leave VS Code. Nodes without a
+    // citation still open their permalink directly when one is available.
+    function openNode(el) {
+      const node = parseNode(el);
+      if (!node) { return; }
+      const data = node.data || {};
+      const citation = el.getAttribute('data-citation');
+      if (citation && focusEvidence(citation)) {
+        renderDetails(node);
+        return;
+      }
+      // No evidence card to land on, so leave the editor: the thread in Slack, or
+      // the PR / issue on the forge that resolved this node.
+      const external = typeof data.permalink === 'string' && data.permalink
+        ? data.permalink
+        : (typeof data.external_url === 'string' ? data.external_url : '');
+      if (external) {
+        vscodeApi.postMessage({ type: 'openLink', url: external });
+        renderDetails(node);
+        return;
+      }
+      activate(el);
+    }
+
     function wire(el) {
       // Satellite edges (AUTHORED_BY, TRACKED_BY) are folded into the card and so draw
       // no arc of their own -- tracing a chip by its own id would dim the whole graph.
@@ -1130,6 +1342,10 @@ const CLIENT_SCRIPT = `
       el.addEventListener('blur', function () { setTrace(null); });
       el.addEventListener('click', function (event) {
         event.stopPropagation();
+        if (event.target instanceof Element && event.target.closest('.node-open')) {
+          openNode(el);
+          return;
+        }
         activate(el);
       });
       el.addEventListener('keydown', function (event) {
@@ -1137,13 +1353,36 @@ const CLIENT_SCRIPT = `
           event.preventDefault();
           activate(el);
         }
+        // The action the hover button performs, without a pointer.
+        if (event.key === 'o' || event.key === 'O') {
+          event.preventDefault();
+          openNode(el);
+        }
       });
     }
+
+    function clearSelection() {
+      nodeEls.forEach(function (n) { n.classList.remove('selected'); });
+      if (document.activeElement instanceof HTMLElement ||
+          document.activeElement instanceof SVGElement) {
+        document.activeElement.blur();   // otherwise the focus ring outlives the click
+      }
+      if (details) {
+        details.classList.add('empty');
+        details.textContent = 'Click a node above for its full detail.';
+      }
+    }
+
+    // Node clicks stop propagating, so a click that reaches the canvas landed on
+    // empty space: treat it as "nothing is selected" rather than leaving the last
+    // card ringed with no way to undo it.
+    outer.addEventListener('click', clearSelection);
 
     nodeEls.forEach(wire);
     chipEls.forEach(wire);
 
     destroyGraph = function () {
+      outer.removeEventListener('click', clearSelection);
       outer.removeEventListener('wheel', onWheel);
       outer.removeEventListener('mousedown', onDown);
       window.removeEventListener('mousemove', onMove);

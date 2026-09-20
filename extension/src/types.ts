@@ -112,3 +112,33 @@ export interface Selection {
   github_repo?: string;
   precomputed_blame?: Record<string, unknown>;
 }
+
+/** `GET /ingest/status` -- how far the index is caught up. Cheap; never hits Slack. */
+export interface IngestStatus {
+  /** Per channel, the timestamp of the newest message already indexed. */
+  channels: Record<string, number>;
+  /** The oldest of those: a sync is only complete through the laggard channel. */
+  covered_through: number | null;
+  never_run: boolean;
+  source: 'export' | 'slack';
+  running: boolean;
+  docs?: number;
+  error?: string;
+  /** `'*'` = every channel the token can read; a number = that many named channels. */
+  scope?: string | number;
+}
+
+/** `POST /ingest/sync` -- what one press of Backfill actually did. */
+export interface IngestResult {
+  ok: boolean;
+  mode: string;
+  new_messages: number;
+  affected: number;
+  units: number;
+  indexed: number;
+  channels: Record<string, number>;
+  covered_through: number | null;
+  never_run: boolean;
+  /** The progress lines the CLI would have printed, in order. */
+  log: string[];
+}

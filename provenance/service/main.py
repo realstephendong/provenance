@@ -1,4 +1,4 @@
-"""FastAPI service: /health, /context/count, /context.
+"""FastAPI service: /health, /context/count, /context, /ingest/*.
 
 `POST /context` is the one backend contract all three surfaces consume -- the VS Code
 extension, the MCP server, and the terminal CLI. There is deliberately no second
@@ -10,13 +10,15 @@ from __future__ import annotations
 import asyncio
 import time
 from contextlib import asynccontextmanager, contextmanager
+from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from .. import config, observability
+from ..ingest import load, sync
+from ..ingest.slack_client import SlackError
 from ..integrations import github
-from ..ingest import load
 from ..models import (
     BlameInfo, ContextRequest, ContextResponse, CountResponse, Result,
 )
@@ -73,6 +75,111 @@ def health() -> dict:
     except Exception as exc:
         out["error"] = str(exc)
     return out
+
+
+# --- ingest ----------------------------------------------------------------------
+# The Provenance panel's Backfill button. It drives `ingest.sync`, the same library
+# `python -m provenance.ingest` drives, against the same checkpoint file -- so a sync
+# started from the panel and one started from a terminal share one notion of what has
+# already been indexed, and neither re-pays for the other's work.
+
+# One sync at a time. A second concurrent run would read the same window, re-summarize
+# the same threads at full LLM cost, and race the first one to write the checkpoint.
+_ingest_lock = asyncio.Lock()
+
+
+def _checkpoint_path() -> Path:
+    return Path(config.INGEST_CHECKPOINT_FILE)
+
+
+@app.get("/ingest/status")
+def ingest_status() -> dict:
+    """How far the index is caught up, without touching Slack.
+
+    Cheap on purpose: the panel asks for this on every open, so it reads the
+    checkpoint file and a document count and nothing else.
+    """
+    out: dict = {
+        **sync.coverage(_checkpoint_path()),
+        "source": "export" if config.USE_MOCK_DATA else "slack",
+        "running": _ingest_lock.locked(),
+        # What ingest is *scoped* to, which is not the same as what it has indexed.
+        # A channel list narrower than the workspace is the one failure this whole
+        # feature had no way to show: backfill reported success having looked at one
+        # channel of fourteen. `*` resolves at ingest time, so the count is unknown
+        # here and the panel says so rather than guessing.
+        "scope": "*" if config.SLACK_DISCOVER_CHANNELS else len(config.SLACK_CHANNEL_IDS),
+    }
+    try:
+        es = es_client()
+        out["docs"] = (
+            int(es.count(index=config.INDEX)["count"])
+            if es.indices.exists(index=config.INDEX) else 0
+        )
+    except Exception as exc:
+        out["error"] = str(exc)
+    return out
+
+
+@app.post("/ingest/sync")
+async def ingest_sync() -> dict:
+    """Index everything posted since the last sync, and nothing else.
+
+    `run_incremental` reads back further than the checkpoint -- a thread can gain a
+    reply weeks after its parent -- but only messages newer than the checkpoint count
+    as new, and only the units they belong to are rebuilt. The document id is derived
+    from the conversation, so a rebuilt unit overwrites in place.
+
+    With no checkpoint at all every message is new, so the first press is a full
+    backfill and every press after it is the delta. That is the same code path either
+    way; there is no separate "first run".
+    """
+    if _ingest_lock.locked():
+        raise HTTPException(status_code=409, detail="a sync is already running")
+
+    async with _ingest_lock:
+        try:
+            config.require_api_key()
+        except config.MissingAPIKey as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from None
+
+        # Refuse to read one corpus into an index built from the other. The checkpoint
+        # and the document ids are both per-conversation, so nothing *collides* -- the
+        # seed and the live workspace would simply both be in there, answering queries
+        # together, while the source stamp and /health still named one of them. A
+        # person pressing a button in a panel has no way to see that happen, so it is
+        # refused rather than reported (the same stance as `retrieve.check_embedder`).
+        intended = "export" if config.USE_MOCK_DATA else "slack"
+        conflict = sync.corpus_conflict(es_client(), intended)
+        if conflict:
+            raise HTTPException(status_code=409, detail=(
+                f"{conflict} (USE_MOCK_DATA={str(config.USE_MOCK_DATA).lower()} "
+                f"selects {intended!r}.)"
+            ))
+
+        log: list[str] = []
+        try:
+            # Building a live source calls auth.test and one history read per channel.
+            source = await asyncio.to_thread(sync.default_source, log.append)
+        except sync.SourceUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from None
+
+        try:
+            result = await sync.run_incremental(
+                source.load, _checkpoint_path(), say=log.append,
+                source_label=source.label, source_detail=source.detail,
+            )
+        except SlackError as exc:
+            # The read happens before anything is written or checkpointed, so the
+            # index and the checkpoint are exactly as they were.
+            raise HTTPException(status_code=502, detail=f"Slack read failed: {exc}") from None
+        finally:
+            source.close()
+
+        # `checkpoint` is the raw per-channel state; `coverage` says the same thing
+        # in the shape the panel renders, so only one of them ships.
+        counts = {k: v for k, v in result.items() if k != "checkpoint"}
+        return {"ok": True, **counts, **sync.coverage(_checkpoint_path()), "log": log}
 
 
 def _to_results(hits: list[dict]) -> list[Result]:

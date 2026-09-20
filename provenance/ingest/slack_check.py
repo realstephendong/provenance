@@ -49,6 +49,7 @@ class ChannelAccess:
 @dataclass
 class AccessReport:
     ok: bool = False
+    discovered: bool = False   # the channel list came from `*`, not from .env
     user: str = ""
     team_id: str = ""
     workspace_url: str = ""
@@ -80,6 +81,25 @@ def _explain(err: SlackError, channel_id: str) -> tuple[str, str]:
     return f"Slack returned '{err.code}'", "re-run; if it persists, check the Slack app's settings"
 
 
+def discover_channels(client: SlackClient, say: Callable[[str], None] = print) -> list[str]:
+    """Every non-archived channel the token can see, for `SLACK_CHANNEL_IDS=*`.
+
+    Listing is not reading: a public channel appears here whether or not you have
+    joined it, and a private one only if you are a member. Whether each is actually
+    readable is still settled by the per-channel probe below, which is the only
+    answer this module ever trusts.
+    """
+    ids = [
+        ch["id"]
+        for ch in client.paginate("conversations.list", "channels",
+                                  types="public_channel,private_channel",
+                                  exclude_archived=True, limit=200)
+        if not ch.get("is_archived")
+    ]
+    say(f"  [ok] discovered {len(ids)} channels from SLACK_CHANNEL_IDS=*")
+    return ids
+
+
 def check_access(
     client: SlackClient,
     team_id: str,
@@ -109,6 +129,16 @@ def check_access(
         return report
     say(f"  [ok] workspace: {report.team_id}")
 
+    if "*" in channel_ids:
+        report.discovered = True
+        try:
+            channel_ids = discover_channels(client, say)
+        except SlackError as exc:
+            reason, fix = _explain(exc, "")
+            report.error = f"could not list channels: {reason} -> {fix}"
+            say(f"  [x] channels: {report.error}")
+            return report
+
     for cid in channel_ids:
         access = ChannelAccess(channel_id=cid)
         report.channels.append(access)
@@ -124,7 +154,18 @@ def check_access(
             access.reason, access.fix = _explain(exc, cid)
             say(f"  [x] {cid}: {access.reason}")
 
-    report.ok = bool(report.channels) and all(c.ok for c in report.channels)
+    readable = [c for c in report.channels if c.ok]
+    if report.discovered:
+        # `*` is "whatever I can read", so a channel the token cannot read is not an
+        # error -- it is the answer. An explicitly listed channel is different: a
+        # person named it, and silently skipping it would index less than they asked
+        # for while reporting success.
+        skipped = len(report.channels) - len(readable)
+        if skipped:
+            say(f"  [ok] skipping {skipped} channel(s) this token cannot read")
+        report.ok = bool(readable)
+    else:
+        report.ok = bool(report.channels) and all(c.ok for c in report.channels)
     return report
 
 
@@ -133,6 +174,12 @@ def verdict_lines(report: AccessReport) -> list[str]:
         return [f"NO ACCESS: {report.error}"]
     if not report.channels:
         return ["NO ACCESS: no channels configured -> set SLACK_CHANNEL_IDS in .env"]
+    if report.discovered:
+        readable = [c for c in report.channels if c.ok]
+        if not readable:
+            return ["NO ACCESS: SLACK_CHANNEL_IDS=* found no channel this token can read"]
+        return [f"ACCESS OK: {len(readable)} channel(s) — "
+                + ", ".join(f"#{c.name}" for c in readable)]
     return [
         f"ACCESS OK: #{c.name}" if c.ok else f"NO ACCESS: #{c.name or c.channel_id}: {c.reason} -> {c.fix}"
         for c in report.channels

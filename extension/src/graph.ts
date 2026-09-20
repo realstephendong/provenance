@@ -70,17 +70,41 @@ export interface RenderOptions {
   fullscreen?: boolean;
 }
 
-// Vendor marks for the systems the evidence actually comes from, inlined as path
+// Vendor marks for the editor and for the systems the evidence comes from, inlined as path
 // data. They cannot be loaded: the webview's CSP is `default-src 'none'` with no
 // `img-src`, so a remote URL and a packaged file would both draw nothing. Each
-// path is the brand's official mark from Simple Icons (CC0 1.0), on a 24x24 box.
-const BRAND_PATHS = {
-  github: 'M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12',
-  slack: 'M5.042 15.165a2.528 2.528 0 0 1-2.52 2.523A2.528 2.528 0 0 1 0 15.165a2.527 2.527 0 0 1 2.522-2.52h2.52v2.52zM6.313 15.165a2.527 2.527 0 0 1 2.521-2.52 2.527 2.527 0 0 1 2.521 2.52v6.313A2.528 2.528 0 0 1 8.834 24a2.528 2.528 0 0 1-2.521-2.522v-6.313zM8.834 5.042a2.528 2.528 0 0 1-2.521-2.52A2.528 2.528 0 0 1 8.834 0a2.528 2.528 0 0 1 2.521 2.522v2.52H8.834zM8.834 6.313a2.528 2.528 0 0 1 2.521 2.521 2.528 2.528 0 0 1-2.521 2.521H2.522A2.528 2.528 0 0 1 0 8.834a2.528 2.528 0 0 1 2.522-2.521h6.312zM18.956 8.834a2.528 2.528 0 0 1 2.522-2.521A2.528 2.528 0 0 1 24 8.834a2.528 2.528 0 0 1-2.522 2.521h-2.522V8.834zM17.688 8.834a2.528 2.528 0 0 1-2.523 2.521 2.527 2.527 0 0 1-2.52-2.521V2.522A2.527 2.527 0 0 1 15.165 0a2.528 2.528 0 0 1 2.523 2.522v6.312zM15.165 18.956a2.528 2.528 0 0 1 2.523 2.522A2.528 2.528 0 0 1 15.165 24a2.527 2.527 0 0 1-2.52-2.522v-2.522h2.52zM15.165 17.688a2.527 2.527 0 0 1-2.52-2.523 2.526 2.526 0 0 1 2.52-2.52h6.313A2.527 2.527 0 0 1 24 15.165a2.528 2.528 0 0 1-2.522 2.523h-6.313z',
-  sentry: 'M13.91 2.505c-.873-1.448-2.972-1.448-3.844 0L6.904 7.92a15.478 15.478 0 0 1 8.53 12.811h-2.221A13.301 13.301 0 0 0 5.784 9.814l-2.926 5.06a7.65 7.65 0 0 1 4.435 5.848H2.194a.365.365 0 0 1-.298-.534l1.413-2.402a5.16 5.16 0 0 0-1.614-.913L.296 19.275a2.182 2.182 0 0 0 .812 2.999 2.24 2.24 0 0 0 1.086.288h6.983a9.322 9.322 0 0 0-3.845-8.318l1.11-1.922a11.47 11.47 0 0 1 4.95 10.24h5.915a17.242 17.242 0 0 0-7.885-15.28l2.244-3.845a.37.37 0 0 1 .504-.13c.255.14 9.75 16.708 9.928 16.9a.365.365 0 0 1-.327.543h-2.287c.029.612.029 1.223 0 1.831h2.297a2.206 2.206 0 0 0 1.922-3.31z',
-} as const;
+// mark is the brand's official one from Simple Icons (CC0 1.0), on a 24x24 box.
+//
+// A mark is a list of subpaths. A subpath with no `fill` inherits the node's accent
+// colour from CSS, which is what GitHub and Sentry want -- they are single-colour
+// marks and reading as the node's colour is the point. Slack is not: it is four
+// coloured arms, and drawing it in one flat purple loses the mark people recognise.
+// So its eight subpaths carry Slack's own palette, which beats the inherited fill.
+interface BrandSubpath {
+  d: string;
+  /** Absent means "take the node's accent colour", which CSS sets on the group. */
+  fill?: string;
+}
 
-type BrandKey = keyof typeof BRAND_PATHS;
+const BRAND_MARKS = {
+  // The anchor node is the editor's own selection, so it takes the editor's mark,
+  // in VS Code's brand blue rather than the theme's accent blue.
+  vscode: [{ d: 'M23.15 2.587L18.21.21a1.494 1.494 0 0 0-1.705.29l-9.46 8.63-4.12-3.128a.999.999 0 0 0-1.276.057L.327 7.261A1 1 0 0 0 .326 8.74L3.899 12 .326 15.26a1 1 0 0 0 .001 1.479L1.65 17.94a.999.999 0 0 0 1.276.057l4.12-3.128 9.46 8.63a1.492 1.492 0 0 0 1.704.29l4.942-2.377A1.5 1.5 0 0 0 24 20.06V3.939a1.5 1.5 0 0 0-.85-1.352zm-5.146 14.861L10.826 12l7.178-5.448v10.896z', fill: '#007ACC' }],
+  github: [{ d: 'M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12' }],
+  slack: [
+    { d: 'M5.042 15.165a2.528 2.528 0 0 1-2.52 2.523A2.528 2.528 0 0 1 0 15.165a2.527 2.527 0 0 1 2.522-2.52h2.52v2.52z', fill: '#E01E5A' },
+    { d: 'M6.313 15.165a2.527 2.527 0 0 1 2.521-2.52 2.527 2.527 0 0 1 2.521 2.52v6.313A2.528 2.528 0 0 1 8.834 24a2.528 2.528 0 0 1-2.521-2.522v-6.313z', fill: '#E01E5A' },
+    { d: 'M8.834 5.042a2.528 2.528 0 0 1-2.521-2.52A2.528 2.528 0 0 1 8.834 0a2.528 2.528 0 0 1 2.521 2.522v2.52H8.834z', fill: '#36C5F0' },
+    { d: 'M8.834 6.313a2.528 2.528 0 0 1 2.521 2.521 2.528 2.528 0 0 1-2.521 2.521H2.522A2.528 2.528 0 0 1 0 8.834a2.528 2.528 0 0 1 2.522-2.521h6.312z', fill: '#36C5F0' },
+    { d: 'M18.956 8.834a2.528 2.528 0 0 1 2.522-2.521A2.528 2.528 0 0 1 24 8.834a2.528 2.528 0 0 1-2.522 2.521h-2.522V8.834z', fill: '#2EB67D' },
+    { d: 'M17.688 8.834a2.528 2.528 0 0 1-2.523 2.521 2.527 2.527 0 0 1-2.52-2.521V2.522A2.527 2.527 0 0 1 15.165 0a2.528 2.528 0 0 1 2.523 2.522v6.312z', fill: '#2EB67D' },
+    { d: 'M15.165 18.956a2.528 2.528 0 0 1 2.523 2.522A2.528 2.528 0 0 1 15.165 24a2.527 2.527 0 0 1-2.52-2.522v-2.522h2.52z', fill: '#ECB22E' },
+    { d: 'M15.165 17.688a2.527 2.527 0 0 1-2.52-2.523 2.526 2.526 0 0 1 2.52-2.52h6.313A2.527 2.527 0 0 1 24 15.165a2.528 2.528 0 0 1-2.522 2.523h-6.313z', fill: '#ECB22E' },
+  ],
+  sentry: [{ d: 'M13.91 2.505c-.873-1.448-2.972-1.448-3.844 0L6.904 7.92a15.478 15.478 0 0 1 8.53 12.811h-2.221A13.301 13.301 0 0 0 5.784 9.814l-2.926 5.06a7.65 7.65 0 0 1 4.435 5.848H2.194a.365.365 0 0 1-.298-.534l1.413-2.402a5.16 5.16 0 0 0-1.614-.913L.296 19.275a2.182 2.182 0 0 0 .812 2.999 2.24 2.24 0 0 0 1.086.288h6.983a9.322 9.322 0 0 0-3.845-8.318l1.11-1.922a11.47 11.47 0 0 1 4.95 10.24h5.915a17.242 17.242 0 0 0-7.885-15.28l2.244-3.845a.37.37 0 0 1 .504-.13c.255.14 9.75 16.708 9.928 16.9a.365.365 0 0 1-.327.543h-2.287c.029.612.029 1.223 0 1.831h2.297a2.206 2.206 0 0 0 1.922-3.31z' }],
+} satisfies Record<string, BrandSubpath[]>;
+
+type BrandKey = keyof typeof BRAND_MARKS;
 
 interface TypeStyle {
   cssClass: string;
@@ -91,11 +115,16 @@ interface TypeStyle {
   description: string;
 }
 
-/** Matches `.node-icon`'s font-size, so swapping a mark in moves nothing else. */
+/** Matches `.node-icon`'s font-size: the box an emoji occupies on a card. */
 const GLYPH = 13;
 
+/** Vendor marks are drawn larger than that box -- at emoji size the GitHub cat and
+ *  the Sentry wave are unreadable smudges. The extra width is centred on the emoji
+ *  box, so the type and label columns beside it do not move. */
+const MARK = 18;
+
 const TYPE_STYLE: Record<NodeType, TypeStyle> = {
-  Code: { cssClass: 'n-code', icon: '\u{1F9E9}', description: 'Your selection' },
+  Code: { cssClass: 'n-code', icon: '\u{1F9E9}', brand: 'vscode', description: 'Your selection' },
   Commit: { cssClass: 'n-commit', icon: '\u{1F517}', brand: 'github', description: 'git blame result' },
   PullRequest: { cssClass: 'n-pr', icon: '\u{1F500}', brand: 'github', description: 'Resolved from the commit' },
   SlackThread: { cssClass: 'n-slack', icon: '\u{1F4AC}', brand: 'slack', description: 'Retrieved evidence' },
@@ -104,15 +133,62 @@ const TYPE_STYLE: Record<NodeType, TypeStyle> = {
   Person: { cssClass: 'n-person', icon: '\u{1F464}', description: 'git blame author' },
 };
 
-/** The card's icon. `top` is the top edge of a GLYPH-sized box; an emoji hangs from
- *  its baseline, so it is placed on the box's bottom edge and a mark is scaled into
- *  the box itself. Marks take their fill from the node's accent colour, in CSS. */
-function cardIcon(style: TypeStyle, x: number, top: number): string {
+/** Baselines of the card's two header rows, measured from the card's top edge. The
+ *  icon is positioned from these rather than from a constant of its own, so it stays
+ *  aligned with the text if either row moves. */
+const TYPE_BASELINE = 18;
+const LABEL_BASELINE = 33;
+
+/** The icon's optical centre: halfway down the block the header rows occupy, from
+ *  the top of the type row's capitals to the label's baseline. Centring on the box
+ *  bounds instead would hang the icon high, because both rows sit near the bottom
+ *  of their line boxes. `.node-type`'s font-size is 8.5px; 0.72em is its cap height. */
+const ICON_CY = (TYPE_BASELINE - 8.5 * 0.72 + LABEL_BASELINE) / 2;
+
+/** The card's icon, centred on (`x` + half a GLYPH box, `cy`). An emoji hangs from
+ *  its baseline and occupies roughly the em box above it, so it is dropped to sit on
+ *  `cy`; a mark is scaled to MARK and centred on the same point. */
+function cardIcon(style: TypeStyle, x: number, cy: number): string {
   if (style.brand === undefined) {
-    return `<text class="node-icon" x="${x}" y="${top + GLYPH}">${style.icon}</text>`;
+    return `<text class="node-icon" x="${x}" y="${(cy + GLYPH * 0.36).toFixed(2)}">${style.icon}</text>`;
   }
-  return `<g class="node-glyph" transform="translate(${x} ${top}) scale(${(GLYPH / 24).toFixed(4)})">
-            <path d="${BRAND_PATHS[style.brand]}" /></g>`;
+  return `<g class="node-glyph" transform="translate(${(x - (MARK - GLYPH) / 2).toFixed(2)} ${(cy - MARK / 2).toFixed(2)}) scale(${(MARK / 24).toFixed(4)})">
+            ${markPaths(style.brand)}</g>`;
+}
+
+/** The card's hover action. Sized to its own label rather than to the card, and
+ *  hung off the same right margin as the date above it so the two right-align into
+ *  one column. */
+const OPEN_W = 40;
+const OPEN_H = 16;
+const OPEN_RIGHT_MARGIN = 12;
+const OPEN_BOTTOM_MARGIN = 8;
+
+/** The action in the card's bottom-right corner, revealed on hover (CSS, in view.ts).
+ *  Every card carries one, so the gesture for "take me to the thing itself" is the
+ *  same everywhere. It replaces the old `[N] →` marker, which numbered Slack cards
+ *  after the evidence list -- a detail of this panel's layout, not of the thread --
+ *  and left every other card's corner empty. What it opens is decided at click time
+ *  from what the node carries: its permalink, else its evidence card, else its
+ *  detail drawer. */
+function openButton(cardW: number, y: number, height: number): string {
+  const x = CARD_X + cardW - OPEN_RIGHT_MARGIN - OPEN_W;
+  // Hung off the card's bottom edge rather than off a text row, so it lands in the
+  // same corner at the same inset whether or not the node has a subtitle.
+  const cy = y + height - OPEN_BOTTOM_MARGIN - OPEN_H / 2;
+  return `<g class="node-open" role="button" aria-label="Open">
+            <rect class="open-bg" x="${x}" y="${(cy - OPEN_H / 2).toFixed(2)}"
+                  width="${OPEN_W}" height="${OPEN_H}" rx="4" />
+            <text x="${x + OPEN_W / 2}" y="${cy.toFixed(2)}">Open</text>
+          </g>`;
+}
+
+/** The subpaths of a mark. A subpath with its own colour states it inline: a fill
+ *  attribute on the path outranks the fill the group inherits from CSS. */
+function markPaths(brand: BrandKey): string {
+  return BRAND_MARKS[brand]
+    .map(p => `<path d="${p.d}"${'fill' in p ? ` fill="${p.fill}"` : ''} />`)
+    .join('');
 }
 
 /** The legend's icon. HTML, not SVG markup -- the legend lives outside the canvas. */
@@ -121,7 +197,7 @@ function legendIcon(style: TypeStyle): string {
     return `<span class="legend-icon">${style.icon}</span>`;
   }
   return `<svg class="legend-icon legend-glyph" viewBox="0 0 24 24" aria-hidden="true"
-               ><path d="${BRAND_PATHS[style.brand]}" /></svg>`;
+               >${markPaths(style.brand)}</svg>`;
 }
 
 /** Attributes of an event, not events in their own right -- these become chips. */
@@ -168,12 +244,21 @@ function dateLabel(ts: number | null): string {
   return ts === null ? '' : new Date(ts).toISOString().slice(0, 10);
 }
 
+/** Git and provider identities can be handles (for example, `Awais-H`) rather
+ * than presentation names. The graph needs only the familiar first-name part. */
+function firstName(value: string): string {
+  return value.trim().split(/[\s_-]+/, 1)[0] || value;
+}
+
 function subtitleFor(node: GraphNode): string {
   const data = node.data ?? {};
   if (typeof data.title === 'string' && data.title) { return data.title; }
   if (typeof data.summary === 'string' && data.summary) { return data.summary; }
-  if (Array.isArray(data.authors) && data.authors.length > 0) { return data.authors.join(', '); }
-  if (typeof data.author === 'string' && data.author) { return data.author; }
+  if (Array.isArray(data.authors) && data.authors.length > 0) {
+    return data.authors.filter((author): author is string => typeof author === 'string')
+      .map(firstName).join(', ');
+  }
+  if (typeof data.author === 'string' && data.author) { return firstName(data.author); }
   if (typeof data.status === 'string' && data.status) { return data.status; }
   return '';
 }
@@ -190,11 +275,6 @@ interface Row {
   height: number;
   cy: number;          // rail dot centre
   ts: number | null;
-}
-
-/** Rough advance width; SVG has no measurement pass and this only drives truncation. */
-function chipWidth(label: string): number {
-  return 14 + label.length * 5.4;
 }
 
 export function renderGraph(graph: Graph, opts: RenderOptions = {}): string {
@@ -267,7 +347,7 @@ export function renderGraph(graph: Graph, opts: RenderOptions = {}): string {
   ordered.forEach((node, index) => {
     const chips = chipsOf.get(node.id) ?? [];
     const subtitle = subtitleFor(node);
-    const height = 42 + (subtitle ? 16 : 0) + (chips.length > 0 ? 22 : 0);
+    const height = 42 + (subtitle ? 16 : 0);
     if (index > 0) { cursor += index === 1 && anchor ? ANCHOR_GAP : ROW_GAP; }
     rows.push({ node, chips, y: cursor, height, cy: cursor + 21, ts: effectiveTs(node) });
     cursor += height;
@@ -514,37 +594,12 @@ export function renderGraph(graph: Graph, opts: RenderOptions = {}): string {
 
   // --- Dots, stubs and cards ------------------------------------------------
   const rowMarkup = rows.map((row) => {
-    const { node, chips, y, height, cy } = row;
+    const { node, y, height, cy } = row;
     const style = TYPE_STYLE[node.type];
     const subtitle = subtitleFor(node);
     const citation = citationOf(node);
     const date = dateLabel(ownTs.get(node.id) ?? null);
     const payload = escapeAttr(JSON.stringify(node));
-
-    let chipMarkup = '';
-    if (chips.length > 0) {
-      const chipY = y + (subtitle ? 56 : 40);
-      let chipX = CARD_X + 12;
-      const limit = CARD_X + CARD_W - 12;
-      for (let i = 0; i < chips.length; i++) {
-        const chip = chips[i];
-        const label = `${TYPE_STYLE[chip.type].icon} ${truncate(chip.label, 16)}`;
-        const width = chipWidth(label);
-        if (chipX + width > limit) {
-          // Out of room: stand the remainder up as a counter rather than clipping.
-          chipMarkup += `<text class="chip-more" x="${chipX + 2}" y="${chipY + 12}">+${chips.length - i}</text>`;
-          break;
-        }
-        chipMarkup += `
-          <g class="chip-node ${TYPE_STYLE[chip.type].cssClass}"
-             data-node-id="${escapeAttr(chip.id)}" data-node-json='${escapeAttr(JSON.stringify(chip))}'
-             tabindex="0" role="button">
-            <rect x="${chipX}" y="${chipY}" width="${width}" height="17" rx="8.5" />
-            <text x="${chipX + 7}" y="${chipY + 12}">${escapeHtml(label)}</text>
-          </g>`;
-        chipX += width + 5;
-      }
-    }
 
     return `
       <g class="row">
@@ -553,16 +608,15 @@ export function renderGraph(graph: Graph, opts: RenderOptions = {}): string {
         <g class="node ${style.cssClass}${citation !== null ? ' linkable' : ''}"
            data-node-id="${escapeAttr(node.id)}" data-node-json='${payload}'
            ${citation !== null ? `data-citation="${citation}"` : ''} tabindex="0" role="button">
-          <rect x="${CARD_X}" y="${y}" width="${CARD_W}" height="${height}" rx="8" />
+          <rect class="card" x="${CARD_X}" y="${y}" width="${CARD_W}" height="${height}" rx="8" />
           <rect class="accent" x="${CARD_X}" y="${y}" width="4" height="${height}" rx="2" />
-          ${cardIcon(style, CARD_X + 14, y + 13)}
-          <text class="node-type" x="${CARD_X + 36}" y="${y + 18}">${escapeHtml(node.type)}</text>
-          ${date ? `<text class="node-date" x="${CARD_X + CARD_W - 12}" y="${y + 18}">${escapeHtml(date)}</text>` : ''}
-          <text class="node-label" x="${CARD_X + 36}" y="${y + 33}">${escapeHtml(truncate(node.label, citation !== null ? 20 : 24))}</text>
-          ${citation !== null ? `<text class="node-cite" x="${CARD_X + CARD_W - 12}" y="${y + 33}">[${citation}] →</text>` : ''}
-          ${subtitle ? `<text class="node-subtitle" x="${CARD_X + 14}" y="${y + 48}">${escapeHtml(truncate(subtitle, 40))}</text>` : ''}
+          ${cardIcon(style, CARD_X + 14, y + ICON_CY)}
+          <text class="node-type" x="${CARD_X + 36}" y="${y + TYPE_BASELINE}">${escapeHtml(node.type)}</text>
+          ${date ? `<text class="node-date" x="${CARD_X + CARD_W - 12}" y="${y + TYPE_BASELINE}">${escapeHtml(date)}</text>` : ''}
+          <text class="node-label" x="${CARD_X + 36}" y="${y + LABEL_BASELINE}">${escapeHtml(truncate(node.label, 20))}</text>
+          ${openButton(CARD_W, y, height)}
+          ${subtitle ? `<text class="node-subtitle" x="${CARD_X + 14}" y="${y + 48}">${escapeHtml(truncate(subtitle, 28))}</text>` : ''}
         </g>
-        ${chipMarkup}
       </g>`;
   }).join('');
 

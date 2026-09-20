@@ -238,11 +238,16 @@ def resolve_units(client: SlackClient, channel_id: str, target_ts: str) -> list[
     so that case re-segments recent history and finds the piece holding it.
 
     Both paths go through `segment` rather than building a `Unit` by hand, and that is
-    the point: rule 4 splits a thread over MAX_MESSAGES_PER_UNIT at its widest internal
-    gap. Skipping it here would write one oversized unit whose `thread_id` no longer
-    matches any piece a batch ingest builds from the same thread -- so the ids would
-    stop agreeing and both copies would survive in the index. Hence a list: an
+    the point: rule 4 splits a thread over MAX_MESSAGES_PER_UNIT into sequential
+    windows. Skipping it here would write one oversized unit whose `thread_id` no
+    longer matches any piece a batch ingest builds from the same thread -- so the ids
+    would stop agreeing and both copies would survive in the index. Hence a list: an
     over-long thread is several units, and all of them get written.
+
+    The same requirement is why rule 2 reads SEGMENT_TRUST_TIME from config instead of
+    taking an argument: this path segments recent history while batch ingest segments
+    the whole channel, and a verdict derived from either sample could differ from the
+    other's.
     """
     name = channel_name(client, channel_id)
 

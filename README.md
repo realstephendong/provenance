@@ -198,6 +198,80 @@ hash, reprocesses the first two, and deletes the third.
 Each mode reads its source **before** it writes, deletes or checkpoints anything, so a
 failed read (a Slack outage, a rate limit) leaves the index as it was.
 
+### The Backfill button
+
+The Provenance panel has a **Backfill** button in the bar along its bottom edge, with
+a line to its left saying how far the index is caught up. It runs `--mode incremental`
+against the same `.provenance/ingest_checkpoint.json` the CLI uses, so a sync started
+from the panel and one started from a terminal share one notion of what is already
+indexed and neither re-pays for the other's work.
+
+The window is the checkpoint's, not the clock's. Each press indexes messages newer
+than the recorded per-channel timestamp, and records the new one when it finishes —
+press it twice and the second press says *Already up to date*. With no checkpoint at
+all every message is new, so the first press is a full backfill and every press after
+it is the delta; there is no separate first-run path.
+
+The bar shows the **oldest** channel's timestamp, since that is the point the whole
+index is genuinely caught up to. Which channel is lagging is in the tooltip.
+
+Two endpoints back it, both usable directly:
+
+```bash
+curl localhost:8000/ingest/status        # coverage; reads the checkpoint, never Slack
+curl -XPOST localhost:8000/ingest/sync   # index what is new
+```
+
+`/ingest/sync` refuses rather than guesses in three cases: a sync is already running
+(409), the token cannot read the channels (503, with the same verdict `make
+slack-check` prints), or the index was built from a different corpus than
+`USE_MOCK_DATA` currently selects (409). The last one matters — without it, pressing
+Backfill on a seed-built index with `USE_MOCK_DATA=false` would quietly read a live
+workspace in alongside the demo corpus, and `/health` would still name only one of
+them.
+
+### When timestamps don't mean anything
+
+Segmentation groups threads by `thread_ts`, which is exact. Everything else — loose
+top-level messages — it groups by *time*, splitting wherever a gap exceeds
+`SEGMENT_GAP_SECONDS`. That only works in a channel people wrote in over days.
+
+A channel that was **seeded or bulk-posted** breaks it. Slack stamps each message with
+the moment it was posted and `chat.postMessage` won't accept a backdated `ts`, so a
+script pasting a dozen separate conversations leaves seconds between all of them. No
+threshold separates them: 45 minutes glues the entire channel into one unit, and a few
+seconds would cut real conversations apart mid-sentence. The distributions overlap, so
+there is no better number to pick.
+
+Every ingest mode now measures this and says so:
+
+```
+  ! loose messages arrive too close together for gaps to mean anything:
+      #eng-general: 41 loose messages, median gap 8s, p90 17s, widest 2m
+    rule 2 splits on gaps over 45m, so every loose message above lands in one
+    blended unit -- one summary, one vector, one permalink for unrelated conversations.
+```
+
+Two fixes, best first:
+
+1. **Post those conversations as Slack threads.** `thread_ts` then answers the question
+   exactly and no inference happens at all.
+2. **`SEGMENT_TRUST_TIME=false`** in `.env`. Loose messages are never merged on time;
+   each becomes its own unit, keeping the ones that say something (a file path, a PR or
+   ticket ref, a backticked identifier, a link, or enough prose). A thin summary of a
+   real message beats a blended summary of five unrelated ones.
+
+It is an explicit flag rather than something ingest infers per run, because the Slack
+bot segments recent history while batch ingest segments the whole channel — a
+data-derived verdict could differ between them, and their unit boundaries, and so their
+document ids, would stop agreeing.
+
+Rule 4 (splitting a unit over `MAX_MESSAGES_PER_UNIT`) is free of timestamps for the
+same reason: it takes sequential windows rather than cutting at the widest internal
+gap, so a few seconds of noise no longer decides where a long thread is divided. Both
+cuts are equally stable when a thread gains replies, and both re-cut after a deleted
+message — that case is `--mode reconcile`'s job either way.
+
 Ingest has two sources: a static export directory (`--source export`, the seed demo
 above) and the live Slack channel (`--source slack`, next section). Both feed the same
 pipeline, and which one is the default follows `USE_MOCK_DATA`. Still **not** built: an
@@ -253,6 +327,18 @@ python -m provenance.ingest --source slack --mode reconcile        # edits/delet
 
 `slack-check` tells you which of these is wrong: no token, a bad or revoked token, a token
 for the wrong workspace, a private channel you are not a member of, or a missing scope.
+
+**Which channels.** `SLACK_CHANNEL_IDS=*` indexes every non-archived channel the token
+can read, resolved on each run, and is the default in `.env.example`. A pasted list is
+the one configuration mistake nothing else catches: ingest reads the channels it was
+given, indexes them correctly, and reports success — while a workspace that has grown
+to fourteen channels gets one of them indexed, and the only symptom is a timeline with
+no Slack in it. Under `*` a channel the token cannot read is skipped rather than fatal;
+under an explicit list it is an error, because a person named it. The panel's bottom
+bar shows the scope beside the coverage for the same reason.
+
+Set `SLACK_CHANNEL_TIERS` alongside it — `eng-incidents:1,social:3` — or every channel
+weighs the same and a watercooler thread ranks with an incident review.
 
 **Keeping it in sync.** `incremental` re-reads the last few days and threads whose parent is
 newer than `SLACK_THREAD_LOOKBACK_DAYS` (default 14). A reply to an older thread, an edit,
@@ -505,7 +591,7 @@ provenance/
   llm.py             the only module that calls OpenAI
   observability.py   Sentry, no-op when unconfigured
   integrations/      GitHub / tickets / incidents: fixtures or live, one adapter each
-  ingest/            Slack -> Elasticsearch, three batch modes
+  ingest/            Slack -> Elasticsearch: sync.py is the library, three modes
   slackbot/          the on-demand bot: one conversation, indexed from Slack
   service/           the live /context pipeline
   mcp_server/        MCP stdio server

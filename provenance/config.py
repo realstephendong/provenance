@@ -132,6 +132,49 @@ MAX_CODE_CHARS = 8000              # code sent to the code-to-prose prompt is tr
 SEGMENT_GAP_SECONDS = 45 * 60
 MIN_MESSAGES_PER_UNIT = 3
 MAX_MESSAGES_PER_UNIT = 60
+
+# Is a gap between two timestamps trustworthy evidence of a conversation boundary in
+# this workspace? Rule 2 (burst segmentation) is the only place ingest infers a
+# boundary from time, and it is sound only in a channel that was written in real time.
+#
+# It is not sound in a channel that was seeded or bulk-posted. Slack stamps every
+# message with the moment it was posted -- `chat.postMessage` will not accept a
+# backdated `ts` -- so a script that pastes a dozen separate conversations leaves
+# seconds between all of them, and no threshold separates them: 45 minutes glues the
+# whole channel into one unit, and a few seconds would cut real conversations apart
+# mid-sentence. The two distributions genuinely overlap, so this is not a tuning
+# problem and there is no better number to pick.
+#
+# Set this false for such a workspace. Loose messages are then never merged on time;
+# each becomes its own unit rather than being handed an invented boundary. Threads
+# are unaffected either way -- `thread_ts` is exact and involves no time inference,
+# which is why threading a seeded channel is the better fix where you control it.
+#
+# Deliberately an explicit flag rather than something `segment` sniffs from the
+# message distribution it is handed. The Slack bot segments recent history while
+# batch ingest segments the whole channel, so a data-derived verdict could differ
+# between the two callers, and their unit boundaries -- hence their document ids --
+# would stop agreeing. `ingest.segment.gap_report` prints the evidence; a person
+# sets the flag.
+SEGMENT_TRUST_TIME = os.environ.get("SEGMENT_TRUST_TIME", "true").strip().lower() not in {
+    "0", "false", "no", "off",
+}
+
+# The diagnostic's bar, not a segmentation threshold: when 90% of a channel's
+# consecutive loose messages land closer together than this, its gaps carry no
+# boundary signal and ingest says so rather than silently emitting one blended unit.
+SEGMENT_DEGENERATE_P90_SECONDS = 120.0
+
+# In a channel whose gaps are not trusted, a loose message stands alone, so the
+# MIN_MESSAGES_PER_UNIT floor would drop every one of them. A single message is kept
+# instead unless it is a bare acknowledgement: under this many words *and* carrying no
+# file path, PR or ticket ref, identifier or link.
+#
+# Deliberately permissive. The job here is dropping "lol" and "+1", not judging which
+# messages matter -- a thin document nobody queries costs one summary call and never
+# wins a cosine comparison, while a dropped one is unretrievable forever. This floor
+# is only consulted on that path; a trusted-time channel keeps the old rule.
+SEGMENT_SOLO_MIN_WORDS = 4
 TRIGGER_EMOJI = {"bookmark", "pushpin", "memo", "warning", "fire", "rotating_light"}
 SUMMARY_CONCURRENCY = 8
 UPSERT_BATCH = 64
@@ -219,11 +262,16 @@ SLACK_WORKSPACE = os.environ.get("SLACK_WORKSPACE", "acme")
 SLACK_API = os.environ.get("SLACK_API", "https://slack.com/api").rstrip("/")
 SLACK_USER_TOKEN = os.environ.get("SLACK_USER_TOKEN", "").strip()
 SLACK_TEAM_ID = os.environ.get("SLACK_TEAM_ID", "T0C34UQUW68").strip()
+# Which channels batch ingest reads. `*` means every non-archived channel the token
+# can see, resolved at ingest time -- the same wildcard SLACK_BOT_CHANNEL_IDS takes.
+# Prefer it to a pasted list: a workspace grows channels, and a list silently keeps
+# indexing the subset it was written for while reporting nothing wrong.
 SLACK_CHANNEL_IDS = [
     c.strip()
     for c in os.environ.get("SLACK_CHANNEL_IDS", "C0C34DY037B").split(",")
     if c.strip()
 ]
+SLACK_DISCOVER_CHANNELS = "*" in SLACK_CHANNEL_IDS
 SLACK_CHANNEL_TIER = int(os.environ.get("SLACK_CHANNEL_TIER", "2"))
 # Per-channel override: "eng-incidents:1,eng-payments:1,social:3". A live workspace
 # has the same spread of signal and noise the seed corpus encoded in
