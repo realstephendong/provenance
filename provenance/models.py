@@ -155,6 +155,7 @@ class ThreadPayload(BaseModel):
     commit_shas: list[str] = Field(default_factory=list)
     ticket_refs: list[str] = Field(default_factory=list)
     file_paths: list[str] = Field(default_factory=list)
+    file_basenames: list[str] = Field(default_factory=list)
     symbols: list[str] = Field(default_factory=list)
     reactions: list[str] = Field(default_factory=list)
     is_bookmarked: bool = False

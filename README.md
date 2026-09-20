@@ -69,7 +69,7 @@ For the extension: `make extension`, then open `extension/` in VS Code and press
 POST /context
   ├─ git.blame      ─┐  concurrent   + `git log -L`: the range's full history
   ├─ query_build    ─┘  code → engineering prose (LLM) + symbols (regex)
-  ├─ retrieve          exact tier (PR/SHA/path) + semantic tier (kNN ⊕ BM25, RRF)
+  ├─ retrieve          exact tier (PR/SHA/path/basename/symbol) + semantic (kNN ⊕ BM25, RRF)
   │                    └─ null threshold: short-circuit before spending rerank tokens
   ├─ rerank            LLM relevance pass — exact hits rescued unconditionally
   ├─ synthesis         cited answer + conflict/supersede detection (one JSON call)
@@ -89,10 +89,13 @@ Those six names are also the Sentry span names, so the trace matches the diagram
 3. **Structural evidence outranks inferred evidence, unconditionally.** If git proves
    a commit belongs to PR #4821 and a Slack thread names PR #4821, that relationship
    is asserted, not scored. If the reranker calls it irrelevant, it is kept anyway.
-   This extends backwards in time: `git log -L` walks every commit that ever touched
-   the selected lines, not just the ones still owning them, so the PR behind a value
-   that has since been replaced is on the map too — carrying a `SUPERSEDES` edge, so
-   its thread reads as settled history rather than as a live constraint.
+   Five strengths, in order: PR, commit SHA, repo-relative path, filename, identifier.
+   The last two exist because uncommitted code has no SHA and no PR, so they are the
+   only structural join available while you are still writing it.
+   This also extends backwards in time: `git log -L` walks every commit that ever
+   touched the selected lines, not just the ones still owning them, so the PR behind a
+   value that has since been replaced is on the map too — carrying a `SUPERSEDES` edge,
+   so its thread reads as settled history rather than as a live constraint.
 4. **The system says "no relevant context" rather than fabricate one.** Enforced
    independently at three layers: the retrieval null threshold, the rerank pass, and
    the synthesis prompt.
@@ -413,6 +416,16 @@ implementation strategies without touching any caller:
   `retriever` inside a `function_score`, nor apply one to a `knn` query, so the
   server-side path weights the lexical channel and the Python path weights both.
   The weights are never applied twice on either path.
+
+**The semantic floor.** RRF is rank-based, so the fused score has no magnitude worth
+thresholding — which leaves the dense cosine as the only interpretable relevance number
+in the pipeline. It used to be read exactly once, by the null gate, which judges the
+*whole request*: one strong hit therefore let every weak one in behind it. A
+"print Hello World" selection matched its own thread at 0.768 and an unrelated thread
+about wanting to understand decisions at 0.580, and showed both. `SEMANTIC_FLOOR_RATIO`
+now also applies it per result, at the weaker of `best × 0.85` and `NULL_THRESHOLD` —
+never discarding a hit that would have been reported as relevant had it arrived alone.
+Exact-tier hits are exempt; they are asserted, not scored.
 
 The relevance weights themselves: Gaussian time decay around the commit
 (**symmetric on purpose** — a "this broke prod" thread from *after* the commit is

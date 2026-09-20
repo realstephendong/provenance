@@ -23,12 +23,18 @@ INDEX_MAPPING = {
                           "index": True, "similarity": "cosine"},
         "summary":       {"type": "text"},
         "raw_text":      {"type": "text"},
-        "symbols":       {"type": "text"},
+        # `symbols` is analyzed for the lexical channel, but the exact tier compares
+        # identifiers as identities -- hence the keyword sub-field.
+        "symbols":       {"type": "text", "fields": {"raw": {"type": "keyword"}}},
         "thread_id":     {"type": "keyword"},
         "pr_refs":       {"type": "integer"},
         "commit_shas":   {"type": "keyword"},
         "ticket_refs":   {"type": "keyword"},
         "file_paths":    {"type": "keyword"},
+        # Engineers say "settlement.py" in Slack far more often than
+        # "payments/settlement.py". Indexed beside the full path so the exact tier can
+        # match either, at different strengths.
+        "file_basenames": {"type": "keyword"},
         "participants":  {"type": "keyword"},
         "channel_name":  {"type": "keyword"},
         "channel_id":    {"type": "keyword"},
@@ -42,6 +48,17 @@ INDEX_MAPPING = {
         "content_hash":  {"type": "keyword"},
     }
 }
+
+
+def _basenames(paths: list[str]) -> list[str]:
+    """`["payments/settlement.py"] -> ["settlement.py"]`, deduped, order preserved."""
+    seen, out = set(), []
+    for path in paths:
+        base = path.rsplit("/", 1)[-1]
+        if base and base not in seen:
+            seen.add(base)
+            out.append(base)
+    return out
 
 
 def build_payload(
@@ -76,6 +93,7 @@ def build_payload(
         "commit_shas": refs["commit_shas"],
         "ticket_refs": refs["ticket_refs"],
         "file_paths": refs["file_paths"],
+        "file_basenames": _basenames(refs["file_paths"]),
         "symbols": symbols,
         "reactions": unit.reactions,
         "is_bookmarked": unit.is_bookmarked or bookmark,
@@ -101,6 +119,13 @@ def ensure_index(es: Elasticsearch, recreate: bool = False) -> None:
         if recreate:
             es.indices.delete(index=config.INDEX)
         else:
+            # Adding a field, or a sub-field, to an existing mapping is allowed and
+            # idempotent -- and skipping it is a silent-corruption trap. An index
+            # built before `file_basenames` existed would dynamic-map the first
+            # value written to it, the standard analyzer would split
+            # "settlement.py" into "settlement" and "py", and every exact basename
+            # term query would match nothing while looking perfectly healthy.
+            es.indices.put_mapping(index=config.INDEX, properties=INDEX_MAPPING["properties"])
             return
     es.indices.create(index=config.INDEX, settings=INDEX_SETTINGS, mappings=INDEX_MAPPING)
 
