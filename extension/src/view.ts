@@ -332,7 +332,7 @@ export class ProvenanceViewProvider implements vscode.WebviewViewProvider {
     const { selection } = entry;
     this.timelinePanel.title = `Timeline: ${selection.file_path}:${selection.line_start}-${selection.line_end}`;
     if (fresh) {
-      this.timelinePanel.webview.html = this.shell(this.timelinePanel.webview);
+      this.timelinePanel.webview.html = this.shell(this.timelinePanel.webview, false);
     } else {
       void this.timelinePanel.webview.postMessage({ type: 'render', html: timelineFragment(entry) });
     }
@@ -583,7 +583,7 @@ export class ProvenanceViewProvider implements vscode.WebviewViewProvider {
 
   // --- the shell: painted once, then fed fragments over postMessage ----------
 
-  private shell(webview: vscode.Webview): string {
+  private shell(webview: vscode.Webview, includeStatusbar = true): string {
     const csp = webview.cspSource;
     return `<!DOCTYPE html>
 <html lang="en">
@@ -595,8 +595,9 @@ export class ProvenanceViewProvider implements vscode.WebviewViewProvider {
 ${STYLES}
 </style>
 </head>
-<body>
+<body${includeStatusbar ? '' : ' class="timeline-page"'}>
 <div id="app"></div>
+${includeStatusbar ? `
 <!-- Outside #app on purpose: fragments replace that whole subtree on every render,
      and indexing is not a property of the selection being explained. The bar is the
      one control that is always available, including before the first query. -->
@@ -615,7 +616,7 @@ ${STYLES}
     </button>
     <button id="private-status" title="Show your private index and Slack connection status">My index</button>
   </div>
-</div>
+</div>` : ''}
 <script>
 ${CLIENT_SCRIPT}
 </script>
@@ -950,11 +951,13 @@ const STYLES = `
                    white-space: normal; }
   .sb-actions { display: flex; align-items: center; gap: 5px; min-width: 0; }
   .sb-actions button { min-width: 0; padding: 3px 7px; font-size: 0.72rem;
-                       line-height: 1.2; white-space: nowrap; }
+                       line-height: 1.2; white-space: nowrap; height: 24px;
+                       box-sizing: border-box; }
   #backfill, #reconcile { flex: 1 1 0; }
   .sb-actions .slack-button { flex: 0 0 27px; width: 27px; padding: 3px;
                               display: grid; place-items: center; }
   .slack-button svg { display: block; width: 16px; height: 16px; }
+  body.timeline-page { padding-bottom: 10px; }
   .sb-actions button[disabled] { opacity: 0.55; cursor: default; }
   h1 { font-size: 0.98rem; margin: 0 0 4px; font-weight: 600; word-break: break-all; }
   h2 { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em;
