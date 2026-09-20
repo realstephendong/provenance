@@ -45,6 +45,17 @@ def pull_request_url(pr_number: int) -> str | None:
     return f"{config.GITHUB_WEB_URL}/{repository}/pull/{pr_number}" if repository else None
 
 
+def commit_url(sha: str) -> str | None:
+    """Return the forge URL for a commit in this request's repository.
+
+    The extension binds the workspace's origin remote with ``set_repository`` before
+    resolving a graph, so this remains correct when one shared API serves many repos.
+    GitHub accepts the abbreviated SHAs produced by git blame as well as full SHAs.
+    """
+    repository = _repo()
+    return f"{config.GITHUB_WEB_URL}/{repository}/commit/{sha}" if repository and sha else None
+
+
 def _load() -> list[dict]:
     global _CACHE
     if _CACHE is None:

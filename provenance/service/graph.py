@@ -147,6 +147,8 @@ def resolve(
                 "lines": c.lines,
                 "dominant": c.dominant,
                 "current": c.current,
+                "external_url": github.commit_url(c.sha),
+                "external_label": "Open commit on GitHub",
             },
         )
         commit_ids.append(commit_id)
