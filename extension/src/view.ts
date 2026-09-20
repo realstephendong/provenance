@@ -602,10 +602,19 @@ ${STYLES}
      one control that is always available, including before the first query. -->
 <div id="statusbar">
   <span class="sb-note" id="sb-note">&nbsp;</span>
-  <button id="backfill" title="Index Slack messages posted since the last sync">Backfill</button>
-  <button id="reconcile" title="Re-read Slack history to remove deleted conversations and refresh edits">Reconcile</button>
-  <button id="connect-slack" title="Connect your Slack account for private indexing">Connect Slack</button>
-  <button id="private-status" title="Show private index and Slack connection status">Private Status</button>
+  <div class="sb-actions">
+    <button id="backfill" title="Index Slack messages posted since the last sync">Backfill</button>
+    <button id="reconcile" title="Re-read Slack history to remove deleted conversations and refresh edits">Reconcile</button>
+    <button id="connect-slack" class="slack-button" aria-label="Connect Slack" title="Connect your Slack account for private indexing">
+      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <path fill="#36C5F0" d="M6.9 14.5a2.1 2.1 0 1 1-2.1-2.1h2.1v2.1Zm1.1 0a2.1 2.1 0 0 1 4.2 0v5.3a2.1 2.1 0 1 1-4.2 0v-5.3Z" />
+        <path fill="#2EB67D" d="M9.1 6.9A2.1 2.1 0 1 1 11.2 4.8v2.1H9.1Zm0 1.1a2.1 2.1 0 0 1 0 4.2H3.8a2.1 2.1 0 1 1 0-4.2h5.3Z" />
+        <path fill="#ECB22E" d="M16.7 9.1a2.1 2.1 0 1 1 2.1 2.1h-2.1V9.1Zm-1.1 0a2.1 2.1 0 0 1-4.2 0V3.8a2.1 2.1 0 1 1 4.2 0v5.3Z" />
+        <path fill="#E01E5A" d="M14.5 16.7a2.1 2.1 0 1 1-2.1 2.1v-2.1h2.1Zm0-1.1a2.1 2.1 0 0 1 0-4.2h5.3a2.1 2.1 0 1 1 0 4.2h-5.3Z" />
+      </svg>
+    </button>
+    <button id="private-status" title="Show your private index and Slack connection status">My index</button>
+  </div>
 </div>
 <script>
 ${CLIENT_SCRIPT}
@@ -925,21 +934,28 @@ const STYLES = `
     padding: 10px 12px 28px; line-height: 1.5; font-size: 0.9rem;
     overflow-wrap: anywhere;
     /* Leave room for the fixed status bar so the last card is never under it. */
-    padding-bottom: 46px;
+    padding-bottom: 76px;
   }
   /* Bottom-right, mirroring "Send to agent" at the bottom left of the report. */
   #statusbar {
     position: fixed; left: 0; right: 0; bottom: 0;
-    display: flex; align-items: center; gap: 8px;
+    display: flex; flex-direction: column; align-items: stretch; gap: 5px;
     padding: 6px 12px;
     background: var(--vscode-sideBar-background, var(--vscode-editor-background));
     border-top: 1px solid var(--vscode-panel-border);
   }
-  .sb-note { flex: 1; min-width: 0; font-size: 0.72rem; opacity: 0.6;
+  .sb-note { min-width: 0; font-size: 0.72rem; opacity: 0.6;
              white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .sb-note.error { color: var(--vscode-errorForeground); opacity: 0.9;
                    white-space: normal; }
-  #backfill[disabled] { opacity: 0.55; cursor: default; }
+  .sb-actions { display: flex; align-items: center; gap: 5px; min-width: 0; }
+  .sb-actions button { min-width: 0; padding: 3px 7px; font-size: 0.72rem;
+                       line-height: 1.2; white-space: nowrap; }
+  #backfill, #reconcile { flex: 1 1 0; }
+  .sb-actions .slack-button { flex: 0 0 27px; width: 27px; padding: 3px;
+                              display: grid; place-items: center; }
+  .slack-button svg { display: block; width: 16px; height: 16px; }
+  .sb-actions button[disabled] { opacity: 0.55; cursor: default; }
   h1 { font-size: 0.98rem; margin: 0 0 4px; font-weight: 600; word-break: break-all; }
   h2 { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em;
        opacity: 0.65; margin: 18px 0 8px; font-weight: 600; display: inline; }
@@ -1209,17 +1225,17 @@ const CLIENT_SCRIPT = `
     } else if (message.type === 'statusbar') {
       const note = document.getElementById('sb-note');
       const button = document.getElementById('backfill');
-      const reconcile = document.getElementById('reconcile');
       if (note) {
         note.textContent = message.note || '';
         note.className = 'sb-note' + (message.isError ? ' error' : '');
         note.title = message.title || '';
       }
       if (button) {
-        button.disabled = !!message.busy;
         button.textContent = message.label || 'Backfill';
       }
-      if (reconcile) { reconcile.disabled = !!message.busy; }
+      document.querySelectorAll('#statusbar button').forEach(function (control) {
+        control.disabled = !!message.busy;
+      });
     }
   });
 
