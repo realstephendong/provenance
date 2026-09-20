@@ -22,9 +22,9 @@ message's timestamp and `load.point_id` is a UUID5 of channel_id/thread_id, so t
 document written here carries the same _id a later `make ingest-slack` gives the same
 conversation: the two overwrite each other, and neither duplicates.
 
-Reads go through SLACK_USER_TOKEN -- the same read-only user token the batch ingest
-uses, so the bot can only ever see what you can see. The bot token carries Slack's
-command plumbing and nothing else.
+Reads use the installed workspace bot token. To prevent a member from accidentally
+putting an arbitrary channel into the shared index, calls are allowed only for
+SLACK_BOT_CHANNEL_IDS. Private channels also require inviting the bot.
 """
 
 from __future__ import annotations
@@ -50,6 +50,10 @@ class NotFound(RuntimeError):
 
 class IndexUnavailable(RuntimeError):
     """Elasticsearch is not in a state this can safely write to."""
+
+
+class ChannelNotAllowed(RuntimeError):
+    """The shared bot was invoked outside its configured index scope."""
 
 
 @dataclass
@@ -119,6 +123,44 @@ def parse_permalink(text: str) -> tuple[str, str] | None:
     return channel_id, f"{digits[:-6]}.{digits[-6:]}"
 
 
+def require_allowed_channel(channel_id: str) -> None:
+    if "*" not in config.SLACK_BOT_CHANNEL_IDS and channel_id not in config.SLACK_BOT_CHANNEL_IDS:
+        raise ChannelNotAllowed(
+            "this channel is not enabled for shared Provenance indexing. "
+            "Ask an administrator to add it to SLACK_BOT_CHANNEL_IDS."
+        )
+
+
+def ensure_membership(client: SlackClient, channel_id: str) -> None:
+    """Join an allowed public channel on first use.
+
+    Slack's `channels:join` scope permits bots to join public channels only. Private
+    conversations deliberately remain invite-only: their members decide whether the
+    shared index may read them. Calling this before every read is idempotent and avoids
+    a deployment-time sweep over every workspace channel.
+    """
+    try:
+        channel = client.call("conversations.info", channel=channel_id).get("channel", {})
+    except SlackError as exc:
+        if exc.code == "channel_not_found":
+            raise NotFound(
+                "I can't see this channel. For a private channel, invite the Provenance bot first."
+            ) from exc
+        raise
+    if channel.get("is_member"):
+        return
+    if channel.get("is_private"):
+        raise NotFound("the Provenance bot must be invited to this private channel first")
+    try:
+        client.call("conversations.join", channel=channel_id)
+    except SlackError as exc:
+        if exc.code in {"missing_scope", "not_in_channel", "no_permission"}:
+            raise NotFound(
+                "I couldn't join this public channel. Reinstall the app with `channels:join`."
+            ) from exc
+        raise
+
+
 def channel_name(client: SlackClient, channel_id: str) -> str:
     try:
         return client.call("conversations.info", channel=channel_id).get(
@@ -162,6 +204,7 @@ def recent_candidates(client: SlackClient, channel_id: str, limit: int) -> list[
     thread someone just replied to above a channel message from an hour ago -- which
     is the whole point, since the conversation you want is the one you just finished.
     """
+    ensure_membership(client, channel_id)
     name = channel_name(client, channel_id)
     raw = _recent_history(client, channel_id)
     threads = {
@@ -246,9 +289,8 @@ def _ensure_ready(es) -> None:
 def _pin(client: SlackClient, channel_id: str, ts: str) -> str:
     """Flag the conversation in Slack itself. Returns '' on success, else the reason.
 
-    Uses the user token on purpose: the reaction reads as yours, which is exactly the
-    signal `segment`'s rule 3 already looks for, and it needs no bot membership of
-    the channel.
+    Uses the workspace bot token, so the flag is consistently attributed to
+    Provenance and does not require each requester to grant a user token.
     """
     try:
         client.call(
@@ -261,19 +303,14 @@ def _pin(client: SlackClient, channel_id: str, ts: str) -> str:
             return ""
         if exc.code == "missing_scope":
             return (
-                "your user token is missing `reactions:write`, so I couldn't flag this "
+                "the bot is missing `reactions:write`, so I couldn't flag this "
                 "in Slack -- a full re-ingest may drop it if it's a short conversation"
             )
         return f"couldn't add the :{config.SLACK_BOT_PIN_EMOJI}: in Slack ({exc.code})"
 
 
-def _notes(unit: Unit, pin_problem: str) -> list[str]:
+def _notes(pin_problem: str) -> list[str]:
     notes = []
-    if unit.channel_id not in config.SLACK_CHANNEL_IDS:
-        notes.append(
-            f"`#{unit.channel_name}` isn't in `SLACK_CHANNEL_IDS`, so `make ingest-slack` "
-            f"won't cover it. Add `{unit.channel_id}` to keep this after a rebuild."
-        )
     if pin_problem:
         notes.append(pin_problem)
     return notes
@@ -307,13 +344,15 @@ async def index_unit(es, client: SlackClient, unit: Unit) -> IndexedThread:
         commit_shas=payload["commit_shas"],
         ticket_refs=payload["ticket_refs"],
         symbols=payload["symbols"],
-        notes=_notes(unit, pin_problem),
+        notes=_notes(pin_problem),
     )
 
 
 async def index_at(es, client: SlackClient, channel_id: str, target_ts: str) -> IndexedThread:
     """Resolve the conversation around one message, index it, and report the piece
     the request actually pointed at."""
+    require_allowed_channel(channel_id)
+    ensure_membership(client, channel_id)
     units = resolve_units(client, channel_id, target_ts)
     chosen = next((i for i, u in enumerate(units) if _holds(u, target_ts)), 0)
 

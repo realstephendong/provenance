@@ -4,25 +4,21 @@
 # workspace you want to read. If you already made an app from an earlier version of
 # this file, paste this one into "App Manifest" and reinstall instead.
 #
-# After installing, three values go into .env:
-#   SLACK_USER_TOKEN  "OAuth & Permissions" -> User OAuth Token   (xoxp-...)
+# After installing, the hosted workspace bot needs two values in its secret store:
 #   SLACK_BOT_TOKEN   "OAuth & Permissions" -> Bot User OAuth Token (xoxb-...)
 #   SLACK_APP_TOKEN   "Basic Information" -> App-Level Tokens -> new token with
 #                     the `connections:write` scope                (xapp-...)
-# Reinstalling reissues the user token, so copy that one again even if you had it.
 #
 # Keep it an INTERNAL app: never enable distribution or list it in the Marketplace.
 # Since 2025-05-29 Slack limits conversations.history / conversations.replies to 1
 # request per minute (15 messages each) for distributed non-Marketplace apps; internal
 # apps keep the normal limits, which a full-history backfill needs.
 #
-# Reading Slack is still done entirely with *user* scopes, so the token sees exactly
-# what you see and nothing more. Reactions arrive with the message payload, so no
-# reactions:read is needed -- but reactions:write is, because indexing a conversation
-# flags it with a :pushpin: so a later re-ingest keeps it (see slackbot/index_thread.py).
-#
-# The bot's own scopes are only the command plumbing. It answers over each
-# interaction's response_url, and never posts into a channel.
+# The bot reads only the channels the deployment allows in SLACK_BOT_CHANNEL_IDS.
+# With `SLACK_BOT_CHANNEL_IDS=*`, it joins public channels on first use. Invite it to
+# every private allowed channel. Reactions arrive with the message
+# payload, so no reactions:read is needed; reactions:write preserves short indexed
+# conversations during later reconciliation.
 display_information:
   name: Provenance
   description: Indexes a Slack conversation so it surfaces next to the code it explains.
@@ -45,9 +41,9 @@ oauth_config:
     bot:
       - commands
       - chat:write
-    user:
       - channels:history
       - channels:read
+      - channels:join
       - groups:history
       - groups:read
       - users:read

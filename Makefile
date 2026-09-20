@@ -5,7 +5,7 @@ PY := .venv/bin/python
 
 .PHONY: install es seed ingest ingest-incremental reconcile serve mcp eval calibrate \
         extension demo clean slack-check ingest-slack ingest-slack-incremental reconcile-slack \
-        slackbot
+        slackbot deploy deploy-logs deploy-down
 
 install:
 	$(PYTHON) -m venv .venv
@@ -44,9 +44,20 @@ reconcile-slack:
 	$(PY) -m provenance.ingest --source slack --mode reconcile
 
 # The on-demand bot: /provenance and the "Index in Provenance" message shortcut.
-# Needs SLACK_BOT_TOKEN and SLACK_APP_TOKEN on top of SLACK_USER_TOKEN. Long-running.
+# Shared long-running process; needs SLACK_BOT_TOKEN, SLACK_APP_TOKEN, and an allowlist.
 slackbot:
 	$(PY) -m provenance.slackbot
+
+# Shared team deployment: Elasticsearch + API + workspace Slack bot.
+# Configure .env first; see README, "Deploying the shared Slack bot".
+deploy:
+	docker compose -f docker-compose.deploy.yml up -d --build
+
+deploy-logs:
+	docker compose -f docker-compose.deploy.yml logs -f --tail=100
+
+deploy-down:
+	docker compose -f docker-compose.deploy.yml down
 
 serve:
 	.venv/bin/uvicorn provenance.service.main:app --reload --port 8000

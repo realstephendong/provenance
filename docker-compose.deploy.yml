@@ -1,0 +1,50 @@
+# Team deployment: one shared Elasticsearch, API, and Slack Socket Mode bot.
+#
+# Copy .env.example to .env, set the required secrets and channel allowlist, then:
+#   make deploy
+#
+# Elasticsearch is intentionally not published. The API is bound to localhost by
+# default; place an authenticated HTTPS reverse proxy or a private-network gateway in
+# front of it before making it available to teammates.
+services:
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.17.0
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+    volumes:
+      - provenance_es_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  api:
+    build: .
+    env_file: .env
+    environment:
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+    command: uvicorn provenance.service.main:app --host 0.0.0.0 --port 8000
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    ports:
+      - "${PROVENANCE_API_BIND:-127.0.0.1:8000}:8000"
+    restart: unless-stopped
+
+  slackbot:
+    build: .
+    env_file: .env
+    environment:
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+    command: python -m provenance.slackbot
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  provenance_es_data:
