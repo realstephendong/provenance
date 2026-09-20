@@ -217,12 +217,21 @@ function dateLabel(ts: number | null): string {
   return ts === null ? '' : new Date(ts).toISOString().slice(0, 10);
 }
 
+/** Git and provider identities can be handles (for example, `Awais-H`) rather
+ * than presentation names. The graph needs only the familiar first-name part. */
+function firstName(value: string): string {
+  return value.trim().split(/[\s_-]+/, 1)[0] || value;
+}
+
 function subtitleFor(node: GraphNode): string {
   const data = node.data ?? {};
   if (typeof data.title === 'string' && data.title) { return data.title; }
   if (typeof data.summary === 'string' && data.summary) { return data.summary; }
-  if (Array.isArray(data.authors) && data.authors.length > 0) { return data.authors.join(', '); }
-  if (typeof data.author === 'string' && data.author) { return data.author; }
+  if (Array.isArray(data.authors) && data.authors.length > 0) {
+    return data.authors.filter((author): author is string => typeof author === 'string')
+      .map(firstName).join(', ');
+  }
+  if (typeof data.author === 'string' && data.author) { return firstName(data.author); }
   if (typeof data.status === 'string' && data.status) { return data.status; }
   return '';
 }
@@ -239,11 +248,6 @@ interface Row {
   height: number;
   cy: number;          // rail dot centre
   ts: number | null;
-}
-
-/** Rough advance width; SVG has no measurement pass and this only drives truncation. */
-function chipWidth(label: string): number {
-  return 14 + label.length * 5.4;
 }
 
 export function renderGraph(graph: Graph, opts: RenderOptions = {}): string {
@@ -316,7 +320,7 @@ export function renderGraph(graph: Graph, opts: RenderOptions = {}): string {
   ordered.forEach((node, index) => {
     const chips = chipsOf.get(node.id) ?? [];
     const subtitle = subtitleFor(node);
-    const height = 42 + (subtitle ? 16 : 0) + (chips.length > 0 ? 22 : 0);
+    const height = 42 + (subtitle ? 16 : 0);
     if (index > 0) { cursor += index === 1 && anchor ? ANCHOR_GAP : ROW_GAP; }
     rows.push({ node, chips, y: cursor, height, cy: cursor + 21, ts: effectiveTs(node) });
     cursor += height;
@@ -563,37 +567,12 @@ export function renderGraph(graph: Graph, opts: RenderOptions = {}): string {
 
   // --- Dots, stubs and cards ------------------------------------------------
   const rowMarkup = rows.map((row) => {
-    const { node, chips, y, height, cy } = row;
+    const { node, y, height, cy } = row;
     const style = TYPE_STYLE[node.type];
     const subtitle = subtitleFor(node);
     const citation = citationOf(node);
     const date = dateLabel(ownTs.get(node.id) ?? null);
     const payload = escapeAttr(JSON.stringify(node));
-
-    let chipMarkup = '';
-    if (chips.length > 0) {
-      const chipY = y + (subtitle ? 56 : 40);
-      let chipX = CARD_X + 12;
-      const limit = CARD_X + CARD_W - 12;
-      for (let i = 0; i < chips.length; i++) {
-        const chip = chips[i];
-        const label = `${TYPE_STYLE[chip.type].icon} ${truncate(chip.label, 16)}`;
-        const width = chipWidth(label);
-        if (chipX + width > limit) {
-          // Out of room: stand the remainder up as a counter rather than clipping.
-          chipMarkup += `<text class="chip-more" x="${chipX + 2}" y="${chipY + 12}">+${chips.length - i}</text>`;
-          break;
-        }
-        chipMarkup += `
-          <g class="chip-node ${TYPE_STYLE[chip.type].cssClass}"
-             data-node-id="${escapeAttr(chip.id)}" data-node-json='${escapeAttr(JSON.stringify(chip))}'
-             tabindex="0" role="button">
-            <rect x="${chipX}" y="${chipY}" width="${width}" height="17" rx="8.5" />
-            <text x="${chipX + 7}" y="${chipY + 12}">${escapeHtml(label)}</text>
-          </g>`;
-        chipX += width + 5;
-      }
-    }
 
     return `
       <g class="row">
@@ -609,9 +588,8 @@ export function renderGraph(graph: Graph, opts: RenderOptions = {}): string {
           ${date ? `<text class="node-date" x="${CARD_X + CARD_W - 12}" y="${y + TYPE_BASELINE}">${escapeHtml(date)}</text>` : ''}
           <text class="node-label" x="${CARD_X + 36}" y="${y + LABEL_BASELINE}">${escapeHtml(truncate(node.label, citation !== null ? 20 : 24))}</text>
           ${citation !== null ? `<text class="node-cite" x="${CARD_X + CARD_W - 12}" y="${y + LABEL_BASELINE}">[${citation}] →</text>` : ''}
-          ${subtitle ? `<text class="node-subtitle" x="${CARD_X + 14}" y="${y + 48}">${escapeHtml(truncate(subtitle, 40))}</text>` : ''}
+          ${subtitle ? `<text class="node-subtitle" x="${CARD_X + 14}" y="${y + 48}">${escapeHtml(truncate(subtitle, 28))}</text>` : ''}
         </g>
-        ${chipMarkup}
       </g>`;
   }).join('');
 
