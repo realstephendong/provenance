@@ -23,3 +23,7 @@ preview_*.html
 
 # editable install metadata
 *.egg-info/
+
+.DS_Store
+
+settings.json

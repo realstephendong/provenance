@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sys
 import threading
 import time
@@ -347,6 +348,16 @@ def main() -> None:
             "  make install          # or: .venv/bin/pip install slack_bolt"
         )
 
+    # The shared bot uses its one workspace bot token, never Bolt's OAuth flow.
+    #
+    # The deployment also supplies SLACK_CLIENT_ID and SLACK_CLIENT_SECRET to support
+    # the API's per-user, loopback OAuth connector. Bolt notices those conventional
+    # environment names automatically and otherwise creates a local
+    # InstallationStore, then ignores the explicit token below. A container restart
+    # leaves that store empty and produces Slack's misleading "installation ... no
+    # longer available" response for every channel action.
+    os.environ.pop("SLACK_CLIENT_ID", None)
+    os.environ.pop("SLACK_CLIENT_SECRET", None)
     app = App(token=config.SLACK_BOT_TOKEN, raise_error_for_unhandled_request=False)
     register(app)
 
